@@ -1,0 +1,4 @@
+interface:
+  display_name: "Manage Adam Codex Board"
+  short_description: "Manage Adam Codex Board projects and issues"
+  default_prompt: "Manage the referenced Adam Codex Board issue with taskctl and keep its status synchronized."
