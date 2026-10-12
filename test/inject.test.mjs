@@ -366,9 +366,9 @@ test("the injected app opens an existing local Codex task instead of a new compo
     openThreadStart,
     source.indexOf("async function nativeProjectContext", openThreadStart),
   );
-  assert.match(openThreadSource, /if \(row\?\.isConnected\) \{\s*row\.click\?\.\(\);\s*return;/);
+  assert.match(openThreadSource, /if \(row\?\.isConnected\) \{\s*row\.click\?\.\(\);\s*showReturnToDashboard\(\);\s*return;/);
   assert.match(openThreadSource, /await dispatchHostMessage\(\{\s*type: "navigate-to-route",\s*path: routeForThread\(normalizedThreadId\)/);
-  assert.match(source, /return `\/local\/\$\{encodeURIComponent\(threadId\)\}`/);
+  assert.match(source, /const path = `\/local\/\$\{encodeURIComponent\(threadId\)\}`/);
   assert.doesNotMatch(source, /return `\/thread\/\$\{encodeURIComponent\(threadId\)\}`/);
   assert.doesNotMatch(openThreadSource, /focusComposerNonce/);
   assert.match(webApp, /payload: \{ threadId, legacyLocal: true \}/);
@@ -396,9 +396,10 @@ test("remote Codex tasks wait for the exact project and host without a local rou
   assert.match(remoteProjectSource, /selectedProject\?\.projectKind === "remote"/);
   assert.match(remoteProjectSource, /selectedProject\.hostId === hostId/);
   assert.match(remoteProjectSource, /!workspacePath \|\| selectedProject\.workspacePath === workspacePath/);
-  assert.match(remoteOpenSource, /waitForRemoteThreadRow\(normalizedThreadId, projectId\)/);
+  assert.match(remoteOpenSource, /await waitForRemoteProject\(projectId, hostId, workspacePath\)/);
+  assert.match(remoteOpenSource, /path: routeForThread\(normalizedThreadId, hostId\)/);
   assert.match(remoteOpenSource, /type: "taskboard:thread-open-error"/);
-  assert.doesNotMatch(remoteOpenSource, /routeForThread/);
+  assert.doesNotMatch(remoteOpenSource, /routeForThread\(normalizedThreadId\)/);
   assert.match(webApp, /openThread\(conversation\.threadBinding\)/);
   assert.match(webApp, /onOpenThread=\{openThread\}/);
   assert.match(webApp, /project\.id === binding\.codexProjectId[\s\S]*?project\.hostId === binding\.codexHostId[\s\S]*?project\.workspacePath === binding\.workspacePath/);
@@ -922,4 +923,27 @@ test("host integration stays thin", () => {
   assert.doesNotMatch(source, /__codexSessionDeleteBridge/);
   assert.doesNotMatch(source, /import\s*\(/);
   assert.doesNotMatch(source, /window\.fetch\s*=/);
+});
+
+test("Dashboard child frames cannot install native navigation controls", () => {
+  let cleaned = false;
+  const child = {
+    top: {},
+    __codexTaskboardInjection__: { destroy() { cleaned = true; } },
+  };
+  // The complete script must exit before touching the iframe document or bridge.
+  vm.runInNewContext(source, { window: child });
+  assert.equal(cleaned, true);
+  vm.runInNewContext(source, { window: { top: {} } });
+});
+
+test("native conversation routes preserve the remote host identity", () => {
+  const route = vm.runInNewContext(`(${source.slice(
+    source.indexOf("function routeForThread"),
+    source.indexOf("function projectRowById"),
+  ).trim()})`);
+  const id = "01a12f99-e364-7dd0-b5c7-f467ae2d65c6";
+  assert.equal(route(id, "local"), `/local/${id}`);
+  assert.equal(route(id, "remote-ssh-codex-managed:coder"),
+    `/local/${id}?hostId=remote-ssh-codex-managed%3Acoder`);
 });

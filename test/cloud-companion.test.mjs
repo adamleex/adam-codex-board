@@ -658,6 +658,7 @@ test("configured server proxies business APIs without touching local rows and ad
         endpoint: "/api/events",
       },
       localCapabilities: { available: true },
+      remoteBoardHosts: [],
       manageTaskboardSkillPath: app.options.skillPath,
     });
     const session = await fetch(`${baseUrl}/api/local/cloud-session`)

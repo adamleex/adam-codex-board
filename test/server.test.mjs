@@ -113,6 +113,7 @@ test("health and the default local project are available", async () => {
   assert.equal(metadata.response.status, 200);
   assert.deepEqual(metadata.body, {
     manageTaskboardSkillPath: skillPath,
+    remoteBoardHosts: [],
     capabilities: { localAiChat: true },
   });
 
@@ -552,6 +553,7 @@ test("trusted HTTPS origins do not inherit device-local capabilities from tunnel
   assert.equal(metadata.response.status, 200);
   assert.deepEqual(metadata.body, {
     capabilities: { localAiChat: false },
+    remoteBoardHosts: [],
     mode: "cloud",
     realtime: {
       transport: "websocket",
@@ -585,6 +587,7 @@ test("trusted HTTPS origins do not inherit device-local capabilities from tunnel
   assert.equal(localMetadata.response.status, 200);
   assert.deepEqual(localMetadata.body, {
     manageTaskboardSkillPath: skillPath,
+    remoteBoardHosts: [],
     capabilities: { localAiChat: true },
     mode: "cloud",
     realtime: {
@@ -714,7 +717,7 @@ test("project and task CRUD flow", async () => {
   assert.equal(created.sortOrder, 1000);
   assert.equal(created.archivedAt, null);
   assert.deepEqual(created.labels, ["frontend", "mvp"]);
-  assert.equal(created.threadId, "thread-123");
+  assert.equal(created.threadId, null);
   assert.equal(created.creatorType, "user");
   assert.equal(created.creatorId, "local-user");
   assert.equal(created.creatorName, "本地用户");
@@ -756,7 +759,7 @@ test("project and task CRUD flow", async () => {
   const updated = patchResult.body.task;
   assert.equal(updated.title, "Build polished task board");
   assert.equal(updated.priority, "urgent");
-  assert.equal(updated.threadId, "thread-456");
+  assert.equal(updated.threadId, null);
   assert.deepEqual(updated.developmentContext, { type: "branch", branch: "feature/polish" });
   assert.equal(updated.version, 2);
 
@@ -766,7 +769,7 @@ test("project and task CRUD flow", async () => {
   });
   assert.equal(archiveResult.response.status, 200);
   assert.equal(archiveResult.body.task.version, 3);
-  assert.equal(archiveResult.body.task.threadId, "thread-archive");
+  assert.equal(archiveResult.body.task.threadId, null);
   assert.match(archiveResult.body.task.archivedAt, /^\d{4}-\d{2}-\d{2}T/);
 
   const activeList = await request(baseUrl, "/api/tasks?projectId=website");
@@ -785,7 +788,7 @@ test("project and task CRUD flow", async () => {
   assert.equal(restoreResult.response.status, 200);
   assert.equal(restoreResult.body.task.archivedAt, null);
   assert.equal(restoreResult.body.task.version, 4);
-  assert.equal(restoreResult.body.task.threadId, "thread-restore");
+  assert.equal(restoreResult.body.task.threadId, null);
 
   const activeAfterRestore = await request(baseUrl, "/api/tasks?projectId=website");
   assert.deepEqual(activeAfterRestore.body.tasks.map((task) => task.id), [created.id]);
@@ -809,7 +812,7 @@ test("moving a task updates its status and sort order", async () => {
   assert.equal(moveResult.response.status, 200);
   assert.equal(moveResult.body.task.status, "in_progress");
   assert.equal(moveResult.body.task.sortOrder, 2500.5);
-  assert.equal(moveResult.body.task.threadId, "thread-move");
+  assert.equal(moveResult.body.task.threadId, null);
   assert.equal(moveResult.body.task.version, 2);
 });
 
@@ -817,7 +820,7 @@ test("remote task bindings keep their own identity and can be cleared independen
   const baseUrl = await startServer();
   const legacy = (await request(baseUrl, "/api/tasks", {
     method: "POST",
-    body: { title: "Legacy binding", threadId: "legacy-thread" },
+    body: { title: "Legacy binding", threadId: "controller-thread", threadBinding: { threadId: "legacy-thread" } },
   })).body.task;
   assert.equal(legacy.threadId, "legacy-thread");
   assert.equal(legacy.threadBinding, null);
@@ -890,7 +893,7 @@ test("remote task bindings keep their own identity and can be cleared independen
   assert.deepEqual(restored.conversationRefs.map((ref) => ref.threadId), ["controller-thread"]);
 });
 
-test("the active local Codex conversation supplies its exact task binding identity", async () => {
+test("the active local Codex conversation does not implicitly bind collected tasks", async () => {
   const baseUrl = await startServer();
   const runtime = await request(baseUrl, "/api/local/host-runtime", {
     method: "PUT",
@@ -909,13 +912,16 @@ test("the active local Codex conversation supplies its exact task binding identi
     method: "POST",
     body: { title: "Local binding", threadId: "local-thread" },
   })).body.task;
-  assert.deepEqual(task.threadBinding, {
-    threadId: "local-thread",
-    codexProjectId: "local-project",
-    codexProjectKind: "local",
-    codexHostId: "local",
-    workspacePath: "/work/local-project",
-  });
+  assert.equal(task.threadBinding, null);
+  assert.equal(task.threadId, null);
+  const explicitlyBound = (await request(baseUrl, `/api/tasks/${task.id}/move`, {
+    method: "POST",
+    body: { version: task.version, status: "in_progress", threadBinding: {
+      threadId: "local-thread", codexProjectId: "local-project", codexProjectKind: "local",
+      codexHostId: "local", workspacePath: "/work/local-project",
+    } },
+  })).body.task;
+  assert.equal(explicitlyBound.threadBinding.threadId, "local-thread");
 });
 
 test("issues support parent, sub-issue, blocking, and related issue relationships", async () => {
@@ -949,7 +955,7 @@ test("issues support parent, sub-issue, blocking, and related issue relationship
   const parentAdded = await mutateRelation("POST", child, "parent", parent);
   assert.equal(parentAdded.response.status, 200);
   assert.equal(parentAdded.body.task.version, child.version + 1);
-  assert.equal(parentAdded.body.task.threadId, "thread-relations");
+  assert.equal(parentAdded.body.task.threadId, null);
   assert.equal(parentAdded.body.task.relations.parent.id, parent.id);
   assert.equal(parentAdded.body.relatedTask.id, parent.id);
 
@@ -1026,8 +1032,8 @@ test("issues support parent, sub-issue, blocking, and related issue relationship
     "related",
     crossProject,
   );
-  assert.equal(crossProjectRelation.response.status, 400);
-  assert.equal(crossProjectRelation.body.error.code, "CROSS_PROJECT_RELATION");
+  assert.equal(crossProjectRelation.response.status, 200);
+  assert.equal(crossProjectRelation.body.task.relations.related[0].id, crossProject.id);
 });
 
 test("issue tree returns deterministic direct and nested parent paths without changing relation APIs", async () => {
@@ -1156,10 +1162,11 @@ test("issue tree returns deterministic direct and nested parent paths without ch
   });
   assert.equal(otherProject.response.status, 201);
   const external = await createIssue("Tree external", "tree-other");
-  assert.throws(() => database.prepare(`
+  database.prepare(`
     INSERT INTO task_relations (relation_type, source_task_id, target_task_id, origin, created_at)
     VALUES ('blocks', ?, ?, 'manual', ?)
-  `).run(root.id, external.id, new Date().toISOString()), /CROSS_PROJECT_RELATION/);
+  `).run(root.id, external.id, new Date().toISOString());
+  assert.deepEqual((await latest(root.id)).relations.blocks.map(item => item.id), [external.id]);
 });
 
 test("issue relationship changes are broadcast in realtime", async () => {
@@ -1233,7 +1240,7 @@ test("task and comment mutations keep content-specific conversation attribution"
   const baseUrl = await startServer();
   const createResult = await request(baseUrl, "/api/tasks", {
     method: "POST",
-    body: { title: "Keep attribution", threadId: "thread-original" },
+    body: { title: "Keep attribution", threadId: "creator-thread", threadBinding: { threadId: "thread-original" } },
   });
   const task = createResult.body.task;
   const updateResult = await request(baseUrl, `/api/tasks/${task.id}`, {

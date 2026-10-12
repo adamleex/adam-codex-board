@@ -52,7 +52,7 @@ function createTask(database, projectId, title, overrides = {}) {
   });
 }
 
-test("local project moves reject related issues without mutating the task", async () => {
+test("local project moves preserve related issues across projects", async () => {
   const fixture = await createFixture();
   try {
     createProject(fixture.database, "move-related-source");
@@ -69,22 +69,12 @@ test("local project moves reject related issues without mutating the task", asyn
       actor,
     ).task;
 
-    assert.throws(
-      () => fixture.database.updateTask(
-        linked.id,
-        linked.version,
-        { projectId: "move-related-target" },
-        undefined,
-        undefined,
-        actor,
-      ),
-      (error) => error?.status === 409 && error?.code === "CROSS_PROJECT_RELATION",
-    );
-
-    const unchanged = fixture.database.getTask(linked.id);
-    assert.equal(unchanged.projectId, "move-related-source");
-    assert.equal(unchanged.version, linked.version);
-    assert.deepEqual(unchanged.relations.related.map((item) => item.id), [related.id]);
+    const moved = fixture.database.updateTask(linked.id, linked.version,
+      { projectId: "move-related-target" }, undefined, undefined, actor);
+    assert.equal(moved.projectId, "move-related-target");
+    assert.equal(moved.version, linked.version + 1);
+    assert.deepEqual(moved.relations.related.map(item => item.id), [related.id]);
+    assert.deepEqual(fixture.database.getTask(related.id).relations.related.map(item => item.id), [moved.id]);
   } finally {
     await fixture.close();
   }
