@@ -1,6 +1,12 @@
 (() => {
   "use strict";
 
+  // Native navigation belongs to the app window, never its Dashboard iframe.
+  if (window !== window.top) {
+    window.__codexTaskboardInjection__?.destroy?.();
+    return;
+  }
+
   const VERSION = "0.6.13";
   const SOURCE_HASH = window.__CODEX_TASKBOARD_SOURCE_HASH__;
   const SENTINEL_KEY = "__codexTaskboardInjection__";
