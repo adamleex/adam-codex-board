@@ -1079,6 +1079,10 @@
   }
 
   function showReturnToDashboard() {
+    if (active || destroyed) {
+      returnToDashboardButton?.remove();
+      return;
+    }
     if (!returnToDashboardButton) {
       returnToDashboardButton = document.createElement("button");
       returnToDashboardButton.type = "button";
@@ -2013,7 +2017,7 @@
 
   function openTaskboard() {
     if (destroyed) return;
-    if (returnToDashboardButton) returnToDashboardButton.hidden = true;
+    returnToDashboardButton?.remove();
     if (!active) {
       lastFocusedElement = document.activeElement;
       hostContextSnapshot = readHostContext();
