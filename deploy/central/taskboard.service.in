@@ -1,0 +1,14 @@
+[Unit]
+Description=Adam Dashboard {{ROLE}}
+
+[Service]
+Type=simple
+WorkingDirectory={{REPO}}
+EnvironmentFile={{ENV_FILE}}
+ExecStart={{NODE}} {{ENTRY}}
+Restart=always
+RestartSec=5
+UMask=0077
+
+[Install]
+WantedBy=default.target

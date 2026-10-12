@@ -29,6 +29,7 @@ import {
   getAiChatCatalog,
   getCodexThreadProgress,
   getJiraConnection,
+  getTask,
   getTaskboardRevision,
   getTaskboardMetadata,
   listArchivedTasks,
@@ -45,6 +46,7 @@ import {
   setApiText,
   setCurrentUserActor,
   syncJiraConnection,
+  startCommentDiscussion,
   uploadAttachment,
   updateTask as updateTaskRequest,
 } from "./api";
@@ -94,6 +96,7 @@ import {
   taskboardStorage,
 } from "./storage";
 import {
+  createNativeProject,
   installEmbeddedExternalLinkHandler,
   postEmbeddedHostMessage,
   setEmbeddedFrameChallenge,
@@ -735,6 +738,7 @@ export function App() {
   const undoShortcut = navigator.userAgent.includes("Macintosh") ? "⌘Z" : "Ctrl+Z";
   const [theme, setTheme] = useState<Theme>(getInitialTheme);
   const [hostContext, setHostContext] = useState<HostContext | null>(null);
+  const [hostConnectionRevision, setHostConnectionRevision] = useState(0);
   const language = resolveTaskboardLanguage(
     hostContext?.language ?? query.get("lang") ?? navigator.language,
   );
@@ -853,6 +857,7 @@ export function App() {
   } | null>(null);
   const [automationCatalogLoading, setAutomationCatalogLoading] = useState(false);
   const [automationCatalogError, setAutomationCatalogError] = useState<string | null>(null);
+  const [automationCatalogRevision, setAutomationCatalogRevision] = useState(0);
   const projectsRequestRef = useRef(0);
   const tasksRequestRef = useRef(0);
   const tasksRef = useRef<Task[]>([]);
@@ -928,8 +933,9 @@ export function App() {
 
   const selectedProject = projects.find((project) => project.id === selectedProjectId) ?? null;
   const selectedCodexProjectIdentity = useMemo(
-    () => selectedProject ? codexProjectContextForTaskProject(selectedProject.id) : null,
-    [deviceWorkspacePaths, hostContext, projectCodexIdentities, projects, selectedProject?.id],
+    () => selectedProject && taskboardMetadata?.executionMode !== "central"
+      ? codexProjectContextForTaskProject(selectedProject.id) : null,
+    [deviceWorkspacePaths, hostContext, projectCodexIdentities, projects, selectedProject?.id, taskboardMetadata?.executionMode],
   );
   const isAllProjects = selectedProjectId === ALL_PROJECTS_ID;
   const isJiraProject = selectedProject?.source === "jira";
@@ -980,6 +986,7 @@ export function App() {
     );
     return () => controller.abort();
   }, [
+    automationCatalogRevision,
     localAiChatAvailable,
     selectedCodexProjectIdentity?.codexHostId,
     selectedCodexProjectIdentity?.codexProjectId,
@@ -1240,7 +1247,8 @@ export function App() {
   const closeContextMenu = useCallback(() => setContextMenu(null), []);
   function openTaskContextMenu(task: Task, position: { x: number; y: number }) {
     if (
-      isAllProjects
+      taskboardMetadata?.executionMode !== "central"
+      && isAllProjects
       && (!embedded || window.parent === window)
       && task.developmentContext?.type === "worktree"
     ) {
@@ -1603,6 +1611,9 @@ export function App() {
     window.history.pushState(window.history.state, "", detailUrl);
   }
 
+  const openTaskDetailRef = useRef(openTaskDetail);
+  openTaskDetailRef.current = openTaskDetail;
+
   function inheritedLabelsForChild(parent: Task): string[] {
     const taskById = new Map(tasksRef.current.map((candidate) => [candidate.id, candidate]));
     const labels: string[] = [];
@@ -1787,7 +1798,7 @@ export function App() {
   useEffect(() => {
     setAutomationError(null);
     void reconcileProjectAutomation();
-  }, [selectedProjectId, reconcileProjectAutomation]);
+  }, [selectedProjectId, reconcileProjectAutomation, hostConnectionRevision]);
 
   useEffect(() => {
     if (!selectedProjectAutomation?.enabledByUser || !selectedProjectAutomation.idleReason) return;
@@ -1810,6 +1821,11 @@ export function App() {
     function receiveHostMessage(event: MessageEvent) {
       if (event.source !== window.parent || !event.data || typeof event.data !== "object") return;
       const message = event.data as { type?: string; payload?: unknown; theme?: unknown };
+
+      if (message.type === "taskboard:host-reconnected") {
+        setHostConnectionRevision(current => current + 1);
+        return;
+      }
 
       if (message.type === "taskboard:frame-challenge") {
         const challenge = typeof message.payload === "object"
@@ -1866,6 +1882,15 @@ export function App() {
         setActionError(typeof payload.error === "string"
           ? payload.error
           : textRef.current("无法打开 Codex 对话。", "Could not open the Codex conversation."));
+        return;
+      }
+
+      if (message.type === "taskboard:open-task" && message.payload) {
+        const task = message.payload as { identifier?: unknown; projectId?: unknown };
+        if (typeof task.identifier === "string" && typeof task.projectId === "string") {
+          setSelectedProjectId(task.projectId);
+          openTaskDetailRef.current({ identifier: task.identifier, projectId: task.projectId });
+        }
         return;
       }
 
@@ -1936,6 +1961,8 @@ export function App() {
       setTaskboardMetadata((current) => (
         current
         && current.mode === metadata.mode
+        && current.executionMode === metadata.executionMode
+        && JSON.stringify(current.remoteBoardHosts) === JSON.stringify(metadata.remoteBoardHosts)
         && JSON.stringify(current.realtime) === JSON.stringify(metadata.realtime)
         && current.manageTaskboardSkillPath === metadata.manageTaskboardSkillPath
         && current.localCapabilities?.available === metadata.localCapabilities?.available
@@ -2063,6 +2090,24 @@ export function App() {
     }
   }, []);
 
+  // Detail activities are fetched independently of the board list. Reconcile
+  // the task itself on entry and activity refresh so both show current data.
+  useEffect(() => {
+    if (!detailTaskId) return;
+    const controller = new AbortController();
+    void getTask(detailTaskId, controller.signal).then((fresh) => {
+      if (controller.signal.aborted) return;
+      const reconcile = (current: Task[]) => current.map((candidate) => (
+        candidate.id === fresh.id && candidate.version <= fresh.version ? fresh : candidate
+      ));
+      setTasks((current) => sortTasks(reconcile(current)));
+      setArchivedTasks((current) => sortTasks(reconcile(current)));
+    }).catch((error) => {
+      if (!controller.signal.aborted) setActionError(errorMessage(error));
+    });
+    return () => controller.abort();
+  }, [detailTaskId, commentsRevision]);
+
   useEffect(() => {
     if (!taskScopeProjectId) {
       setTasks([]);
@@ -2090,7 +2135,7 @@ export function App() {
     const developmentProjectId = isAllProjects
       ? developmentEditorProjectId ?? (standalone ? contextMenuTask?.projectId : null)
       : selectedProjectId;
-    if (!developmentProjectId) {
+    if (!taskboardMetadata || !developmentProjectId || taskboardMetadata.executionMode === "central") {
       setDevelopmentScan({ workspacePath: null, contexts: [] });
       setDevelopmentScanLoading(false);
       return;
@@ -2130,6 +2175,8 @@ export function App() {
       });
     return () => controller.abort();
   }, [
+    taskboardMetadata?.executionMode,
+    taskboardMetadata?.mode,
     contextMenuTask?.projectId,
     contextMenuTask?.threadId,
     contextMenuWorkspacePath,
@@ -2243,9 +2290,14 @@ export function App() {
     const current = candidate && candidate.version >= changed.version ? candidate : changed;
     const restored = await updateTaskRequest(current, {
       ...taskToDraft(snapshot),
+      projectId: snapshot.projectId,
       ...(assigneeTarget ? { assigneeTarget } : {}),
     });
     setTasks((tasks) => sortTasks(tasks.map((task) => task.id === restored.id ? restored : task)));
+    if (current.projectId !== restored.projectId) {
+      setSelectedProjectId(restored.projectId);
+      openTaskDetail(restored);
+    }
   }
 
   useEffect(() => {
@@ -2726,7 +2778,7 @@ export function App() {
           "This issue changed elsewhere. The board has been synced.",
         )
         : errorMessage(error));
-      if (taskScopeProjectId) void refreshTasks(taskScopeProjectId, { quiet: true });
+      if (taskScopeProjectId) await refreshTasks(taskScopeProjectId, { quiet: true });
       throw error;
     }
   }
@@ -2989,18 +3041,25 @@ export function App() {
       );
       return;
     }
+    if (conversation.threadBinding) {
+      openThread(conversation.threadBinding);
+      return;
+    }
+    if (conversation.legacyLocalThreadId) {
+      openLegacyLocalThread(conversation.legacyLocalThreadId);
+      return;
+    }
     if (conversation.kind === "local-ai" && conversation.aiThreadId) {
+      const thread = aiThreads.find((candidate) => candidate.id === conversation.aiThreadId);
+      if (thread?.origin.issueIdentifier) {
+        openTaskDetail({ identifier: thread.origin.issueIdentifier, projectId: thread.origin.projectId });
+      }
       aiOpenThreadRequestSequenceRef.current += 1;
       setAiOpenThreadRequest({
         threadId: conversation.aiThreadId!,
         requestId: aiOpenThreadRequestSequenceRef.current,
       });
       return;
-    }
-    if (conversation.threadBinding) {
-      openThread(conversation.threadBinding);
-    } else if (conversation.legacyLocalThreadId) {
-      openLegacyLocalThread(conversation.legacyLocalThreadId);
     }
   }
 
@@ -3037,7 +3096,44 @@ export function App() {
     return liveProject ? baseIdentity : null;
   }
 
+  function openTaskInAiChat(task: Task) {
+    openTaskDetail(task);
+    aiOpenThreadRequestSequenceRef.current += 1;
+    setAiOpenThreadRequest({
+      projectId: task.projectId,
+      issueId: task.id,
+      composerText: "",
+      requestId: aiOpenThreadRequestSequenceRef.current,
+    });
+  }
+
+  async function discussTaskComment(task: Task, commentId: string) {
+    let target = codexProjectContextForTaskProject(task.projectId);
+    const savedIdentity = projectCodexIdentities[task.projectId];
+    if (savedIdentity?.codexProjectKind === "remote" && !target) {
+      throw new Error(text("评论已保存，但目标 SSH 项目不可用，讨论未启动。", "Comment saved, but the SSH project is unavailable; discussion did not start."));
+    }
+    if (target?.codexProjectKind === "remote") {
+      target = remoteIdentityForTask(task, target);
+      if (!target) throw new Error(text("评论已保存，但目标 SSH 工作目录未映射。", "Comment saved, but the SSH workspace is not mapped."));
+    }
+    const thread = await startCommentDiscussion(commentId, target ?? {});
+    setAiThreads(current => [thread, ...current.filter(item => item.id !== thread.id)]);
+  }
+
   async function openTaskInThread(task: Task) {
+    if (task.threadBinding) {
+      openThread(task.threadBinding);
+      return;
+    }
+    if (task.legacyLocalThreadId) {
+      openLegacyLocalThread(task.legacyLocalThreadId);
+      return;
+    }
+    if (taskboardMetadata?.executionMode === "central" && !embedded) {
+      openTaskInAiChat(task);
+      return;
+    }
     const standalone = !embedded || window.parent === window;
     const projectless = task.projectId === GLOBAL_PROJECT_ID;
     const taskboardProject = projects.find((project) => project.id === task.projectId);
@@ -3079,10 +3175,22 @@ export function App() {
         : codexProjectContext?.workspacePath
           ?? deviceWorkspacePaths[task.projectId]
           ?? taskboardProject?.workspacePath;
+    const skillReference = codexProjectContext?.codexProjectKind === "remote"
+      ? "$manage-taskboard"
+      : `[$manage-taskboard](${manageTaskboardSkillPath})`;
+    const remoteBoardInstruction = codexProjectContext?.codexProjectKind === "remote"
+      && taskboardMetadata?.remoteBoardHosts?.includes(codexProjectContext.codexHostId)
+      ? '\nUse --runtime-file "$HOME/.config/adam-dashboard/launcher-runtime.json" on every taskctl command. This is the shared Adam Dashboard; do not fall back to another board.'
+      : "";
     const embeddedInstruction = text(
-      `[$manage-taskboard](${manageTaskboardSkillPath}) 议题 ID：${task.identifier}`,
-      `[$manage-taskboard](${manageTaskboardSkillPath}) Issue ID: ${task.identifier}`,
-    );
+      `${skillReference} 议题 ID：${task.identifier}`,
+      `${skillReference} Issue ID: ${task.identifier}`,
+    ) + remoteBoardInstruction + (codexProjectContext ? `\n\nTask conversation target: ${JSON.stringify({
+      codexProjectId: codexProjectContext.codexProjectId,
+      codexProjectKind: codexProjectContext.codexProjectKind,
+      codexHostId: codexProjectContext.codexHostId,
+      workspacePath,
+    })}\nBind this task to the current execution conversation using this project and host identity. Preserve an existing binding; do not replace it with the dashboard conversation.` : "");
 
     if (
       !projectless
@@ -3283,6 +3391,45 @@ export function App() {
     setActionError(null);
   }
 
+  async function createTaskBoardProject(name: string) {
+    const nativeProject = await createNativeProject(name);
+    const identity: CodexProjectIdentity = {
+      codexProjectId: nativeProject.id,
+      codexProjectKind: "local",
+      codexHostId: "local",
+      workspacePath: nativeProject.workspacePath,
+    };
+    const project = await createProjectRequest(nativeProject);
+    setProjects(current => [...current, project]);
+    setProjectCodexIdentities(current => {
+      const next = { ...current, [project.id]: identity };
+      taskboardStorage.setItem(PROJECT_CODEX_IDENTITIES_KEY, JSON.stringify(next));
+      return next;
+    });
+    rememberDeviceWorkspacePath(project.id, identity.workspacePath);
+    return project.id;
+  }
+
+  async function selectTaskProject(task: Task, projectId: string) {
+    const choice = projectChoices.find(project => project.id === projectId);
+    if (choice && !choice.persisted) {
+      const project = await createProjectRequest({ id: choice.id, name: choice.name, workspacePath: null });
+      setProjects(current => [...current, project]);
+    }
+    if (choice?.codexIdentity) {
+      setProjectCodexIdentities(current => {
+        const next = { ...current, [projectId]: choice.codexIdentity! };
+        taskboardStorage.setItem(PROJECT_CODEX_IDENTITIES_KEY, JSON.stringify(next));
+        return next;
+      });
+      rememberDeviceWorkspacePath(projectId, choice.codexIdentity.workspacePath);
+    }
+    const saved = await updateTaskProperties(task, { projectId });
+    setSelectedProjectId(projectId);
+    openTaskDetail(saved);
+    return saved;
+  }
+
   async function createTemporaryProject() {
     if (openingProjectId) return;
     const name = projectName.trim();
@@ -3291,14 +3438,9 @@ export function App() {
     setOpeningProjectId(projectId);
     setActionError(null);
     try {
-      const project = await createProjectRequest({
-        id: projectId,
-        name,
-        workspacePath: null,
-      });
-      setProjects((current) => [...current, project]);
+      const createdProjectId = await createTaskBoardProject(name);
       setProjectCreateOpen(false);
-      changeProject(project.id);
+      changeProject(createdProjectId);
     } catch (error) {
       setActionError(errorMessage(error));
     } finally {
@@ -3546,7 +3688,10 @@ export function App() {
                 pending={automationPending || automationCatalogLoading}
                 error={automationCatalogError ?? automationError}
                 unavailableReason={automationProjectContext.unavailableReason}
-                onOpen={() => void reconcileProjectAutomation()}
+                onOpen={() => {
+                  if (automationCatalogError) setAutomationCatalogRevision((revision) => revision + 1);
+                  else void reconcileProjectAutomation();
+                }}
                 onChange={(options) => void saveProjectAutomation(options)}
               />
             )}
@@ -3730,6 +3875,12 @@ export function App() {
 
         {detailTask && selectedProject ? (
           <TaskDetail
+            projectOptions={projectChoices.filter(project => project.id === detailTask.projectId || !project.codexIdentity?.workspacePath.includes("/Claude/scratch-workspaces/")).map(project => ({
+              id: project.id,
+              label: project.codexIdentity ? `${project.name} · ${project.codexIdentity.codexHostId === "local" ? text("本机", "Local") : project.codexIdentity.codexHostId.replace("remote-ssh-codex-managed:", "")}` : project.name,
+            }))}
+            onSelectProject={selectTaskProject}
+            onCreateProject={createTaskBoardProject}
             key={detailTask.id}
             task={detailTask}
             tasks={tasks.filter((task) => task.projectId === detailTask.projectId)}
@@ -3754,6 +3905,7 @@ export function App() {
             onOpenThread={openThread}
             onOpenLegacyLocalThread={openLegacyLocalThread}
             onOpenInThread={openTaskInThread}
+            onDiscussComment={discussTaskComment}
             onCopy={(text, message) => void copyText(text, message)}
             openingThread={openingThreadTaskId === detailTask.id}
             onError={setActionError}
@@ -4019,7 +4171,7 @@ export function App() {
               if (event.key === "Escape") closeCreateProjectDialog();
             }}
           >
-            <h2 id="project-create-title">{text("创建项目", "Create project")}</h2>
+            <h2 id="project-create-title">{text("创建 Codex 本机项目", "Create local Codex project")}</h2>
             <label>
               <span>{text("项目名称", "Project name")}</span>
               <input
@@ -4223,17 +4375,19 @@ export function App() {
           ).catch(() => {})}
           onDuplicate={(task) => void duplicateTask(task)}
           onCopy={(text, message) => void copyText(text, message)}
-          openInThreadDisabled={developmentScanLoading}
+          openInThreadDisabled={taskboardMetadata?.executionMode !== "central" && developmentScanLoading}
           onOpenInThread={openTaskInThread}
           onArchive={(task) => void archiveTask(task)}
         />
       )}
 
-      {localAiChatAvailable && !isAllProjects && (
+      {localAiChatAvailable && !isAllProjects && (!detailTaskIdentifier || detailTask) && (
         <Suspense fallback={null}>
           <AiChat
+            key={detailTask ? `${detailTask.projectId}:${detailTask.id}` : "general"}
             available
-            projectId={selectedProjectId || null}
+            executionMode={taskboardMetadata?.executionMode}
+            projectId={detailTask?.projectId ?? (selectedProjectId || null)}
             issueId={detailTaskId}
             codexProjectIdentity={selectedCodexProjectIdentity}
             onThreadsChange={setAiThreads}

@@ -1776,3 +1776,33 @@ test("task changes from one LAN client are broadcast to another client", async (
   assert.equal(listResult.body.tasks.some((task) => task.id === createResult.body.task.id), true);
   await reader.cancel();
 });
+
+test("collector attribution never becomes or replaces a task conversation", async () => {
+  const baseUrl = await startServer();
+  const created = await request(baseUrl, "/api/tasks", {
+    method: "POST", body: { title: "Collected requirement", threadId: "collector-thread" },
+  });
+  assert.equal(created.response.status, 201);
+  let task = created.body.task;
+  assert.equal(task.threadId, null);
+  assert.deepEqual(task.conversationRefs, []);
+  const binding = { threadId: "execution-thread", codexProjectId: "remote-project",
+    codexProjectKind: "remote", codexHostId: "remote-ssh-codex-managed:coder", workspacePath: "/home/coder/tools" };
+  const bound = await request(baseUrl, `/api/tasks/${task.id}/move`, {
+    method: "POST", body: { version: task.version, status: "in_progress", threadId: "controller-thread", threadBinding: binding },
+  });
+  assert.equal(bound.response.status, 200);
+  task = bound.body.task;
+  assert.deepEqual(task.threadBinding, binding);
+  const updated = await request(baseUrl, `/api/tasks/${task.id}`, {
+    method: "PATCH", body: { version: task.version, description: "New collected context", threadId: "collector-thread" },
+  });
+  assert.equal(updated.response.status, 200);
+  task = updated.body.task;
+  assert.deepEqual(task.threadBinding, binding);
+  const moved = await request(baseUrl, `/api/tasks/${task.id}/move`, {
+    method: "POST", body: { version: task.version, status: "in_review", threadId: "collector-thread" },
+  });
+  assert.equal(moved.response.status, 200);
+  assert.deepEqual(moved.body.task.threadBinding, binding);
+});

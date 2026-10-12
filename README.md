@@ -1,6 +1,28 @@
 [English](README.md) | [简体中文](README.zh-CN.md)
 
-# Codex Taskboard
+# Adam Dashboard
+
+## Start the dashboard
+
+With Codex already running with debugging enabled on port 9231, run:
+
+```bash
+git clone https://github.com/adamleex/adam-codex-board.git
+cd adam-codex-board
+npm run dashboard
+```
+
+Keep this terminal running. This command reads the saved data directory from `.data/dashboard.json` and SSH connections from `.data/remote-bridges.json`, builds the frontend, starts the local service and connects the Codex sidebar. After changing launcher code, stop the previous dashboard command with `Ctrl+C`, then run the same command again. If an existing launcher is reported, stop it in its original terminal before retrying.
+
+Use this entry point for the configured board: invoking `scripts/codex-injector.mjs` directly does not load `.data/dashboard.json` and can open a different data directory. Once the sidebar opens, check that your existing tasks are visible and that Automation can load its models and quota status.
+
+The primary interface is the **Codex sidebar**. Run `npm run dashboard` to install missing dependencies, build and attach the dashboard to an existing debugging-enabled Codex instance. No browser password or separate execution worker is needed for native Codex conversations. The launcher reports an error if no eligible Codex instance is available; it does not replace a running app.
+
+A task's **Open task conversation** action resumes its saved native conversation, including its remote host. An unbound task prepares a new conversation in its mapped Codex project. Remote execution uses Codex's SSH project connection. The launcher also manages SSH reverse forwarding from `.data/remote-bridges.json`. Remote agents use `$HOME/.config/adam-dashboard/launcher-runtime.json` to access the same board. Connections retry after disconnecting and stop with the launcher.
+
+Configure once with `npm run dashboard -- --ssh-host HOST --host-id CODEX_HOST_ID`; thereafter use `npm run dashboard`. The default Codex debugging port is 9231 (`--cdp-port` overrides it). The local board uses port 47834. Save an existing database location with `--data-dir /absolute/path/.data`; data stays in place. Use `npm run dashboard -- --check` to check configuration and launcher ownership without starting processes. No separate dashboard service is needed on the development machine.
+
+The previous standalone server/worker experiment remains available as `npm run dashboard:standalone` for debugging only. It is not the sidebar workflow. Adam Dashboard is developed locally from [Codex Taskboard](https://github.com/chuspeeism/dashi-taskboard); upstream desktop release links below are provenance, not Adam Dashboard releases.
 
 A local-first issue board that runs in a browser and can be embedded in Codex through the standalone CDP launcher or its injection script. The same HTTP API powers the React UI and the `taskctl` CLI used by the bundled Codex Skill.
 

@@ -106,6 +106,9 @@ import { DescriptionDocument } from "./DescriptionDocument";
 type TaskDetailError = string | readonly [string, string];
 
 interface TaskDetailProps {
+  projectOptions: { id: string; label: string }[];
+  onSelectProject: (task: Task, projectId: string) => Promise<Task>;
+  onCreateProject: (name: string) => Promise<string>;
   task: Task;
   tasks: Task[];
   referenceTasks: Task[];
@@ -135,6 +138,7 @@ interface TaskDetailProps {
   onOpenThread: (binding: CodexThreadBinding) => void;
   onOpenLegacyLocalThread: (threadId: string) => void;
   onOpenInThread: (task: Task) => void;
+  onDiscussComment: (task: Task, commentId: string) => Promise<void>;
   onCopy: (text: string, announcement: string) => void;
   openingThread: boolean;
   onError: (message: TaskDetailError | null) => void;
@@ -394,6 +398,9 @@ function ConversationLink({
 }
 
 export function TaskDetail({
+  projectOptions,
+  onSelectProject,
+  onCreateProject,
   task,
   tasks,
   referenceTasks,
@@ -413,6 +420,7 @@ export function TaskDetail({
   onOpenThread,
   onOpenLegacyLocalThread,
   onOpenInThread,
+  onDiscussComment,
   onCopy,
   openingThread,
   onError,
@@ -451,6 +459,8 @@ export function TaskDetail({
   );
   const [changeStatusToTodo, setChangeStatusToTodo] = useState(false);
   const [submitting, setSubmitting] = useState(false);
+  const [newProjectName, setNewProjectName] = useState("");
+  const [creatingProject, setCreatingProject] = useState(false);
   const [activeMenuId, setActiveMenuId] = useState<string | null>(null);
   const [editingId, setEditingId] = useState<string | null>(null);
   const [editingSegments, setEditingSegments] = useState<InlineMediaSegment[]>(
@@ -620,6 +630,27 @@ export function TaskDetail({
       window.removeEventListener("keydown", closeWithEscape);
     };
   }, [activeMenuId]);
+
+  async function selectTaskProject(projectId: string) {
+    setSavingProperty("project");
+    onError(null);
+    try { setCurrentTask(await onSelectProject(currentTask, projectId)); }
+    catch (error) { onError(issueMessageFor(error)); }
+    finally { setSavingProperty(null); }
+  }
+
+  async function createTaskProject() {
+    if (!newProjectName.trim()) return;
+    setSavingProperty("project");
+    onError(null);
+    try {
+      const id = await onCreateProject(newProjectName.trim());
+      setCreatingProject(false);
+      setNewProjectName("");
+      setCurrentTask(await onSelectProject(currentTask, id));
+    } catch (error) { onError(issueMessageFor(error)); }
+    finally { setSavingProperty(null); }
+  }
 
   async function saveTask(changes: Partial<TaskDraft>, property: string) {
     setSavingProperty(property);
@@ -908,6 +939,7 @@ export function TaskDetail({
       }
       const savedWithRelations = await addMentionRelations(relationAnchor, commentSegments);
       setCurrentTask(savedWithRelations);
+      await onDiscussComment(savedWithRelations, nextComment.id);
       requestAnimationFrame(() => composerRef.current?.focus());
     } catch (error) {
       setCommentsError(messageFor(error));
@@ -1672,7 +1704,7 @@ export function TaskDetail({
                 <NewConversationIcon color="currentColor" />
                 <span>{openingThread
                   ? text("正在打开…", "Opening…")
-                  : text("在新对话打开", "Open in new conversation")}</span>
+                  : text("打开任务会话", "Open task conversation")}</span>
               </button>
               {currentTask.externalUrl && (
                 <a
@@ -1720,6 +1752,34 @@ export function TaskDetail({
               </button>
             </div>
             <h2>{text("属性", "Properties")}</h2>
+            <div className="detail-property-row">
+              <span className="detail-property-label">{text("项目", "Project")}</span>
+              <select
+                className="task-project-select"
+                aria-label={text("项目", "Project")}
+                value={currentTask.projectId}
+                disabled={savingProperty === "project"}
+                onChange={(event) => event.target.value === "__create__"
+                  ? setCreatingProject(true)
+                  : void selectTaskProject(event.target.value)}
+              >
+                {!projectOptions.some(project => project.id === currentTask.projectId) && (
+                  <option value={currentTask.projectId}>{currentTask.projectId}</option>
+                )}
+                {projectOptions.map(project => <option key={project.id} value={project.id}>{project.label}</option>)}
+                <option value="__create__">{text("＋ 新建 Codex 本机项目…", "+ New local Codex project…")}</option>
+              </select>
+            </div>
+            {creatingProject && (
+              <form className="task-project-create" onSubmit={event => { event.preventDefault(); void createTaskProject(); }}>
+                <input autoFocus maxLength={120} aria-label={text("新项目名称", "New project name")} placeholder={text("项目名称", "Project name")}
+                  value={newProjectName} onChange={event => setNewProjectName(event.target.value)} disabled={savingProperty === "project"} />
+                <button type="submit" disabled={!newProjectName.trim() || savingProperty === "project"}>{text("创建并选择", "Create and select")}</button>
+                <button type="button" onClick={() => setCreatingProject(false)} disabled={savingProperty === "project"}>{text("取消", "Cancel")}</button>
+              </form>
+            )}
+            {currentTask.threadBinding && <p className="task-project-note">{text("更换项目只移动任务，已有执行会话保持原绑定。", "Changing project moves the task; its existing execution conversation stays bound.")}</p>}
+
             <div className="detail-property-row">
               <span className="detail-property-label">{text("状态", "Status")}</span>
               <TaskPropertyPicker

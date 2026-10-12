@@ -376,9 +376,15 @@ export class AiChatService {
     this.#validateSandbox(sandbox);
 
     const issue = resolved.issue;
+    if (issue && !input.newConversation) {
+      const existing = this.database.listAiChatThreads().find(thread => (
+        thread.origin.projectId === resolved.project.id && thread.origin.issueId === issue.id
+      ));
+      if (existing) return existing;
+    }
 
     return this.database.createAiChatThread({
-      title: input.title ?? issue?.identifier ?? "New conversation",
+      title: issue ? `${issue.identifier} · ${issue.title}` : input.title ?? "New conversation",
       origin: {
         projectId: resolved.project.id,
         projectName: resolved.project.name,

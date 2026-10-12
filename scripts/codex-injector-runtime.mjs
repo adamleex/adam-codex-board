@@ -19,6 +19,9 @@ function parseHostRequest(payload, parseAutomationRequest) {
     && /^[a-z0-9-]{1,80}$/i.test(request.id)
   ) ? request.id : null;
   if (!id) return { id: null, request: null, error: HOST_REQUEST_ERROR };
+  if (request.action === "find-thread-task" && typeof request.threadId === "string"
+    && /^[0-9a-f-]{36}$/i.test(request.threadId) && typeof request.hostId === "string"
+    && request.hostId.length <= 256) return { id, request, error: null };
   if (request.action === "ensure") return { id, request, error: null };
   if (request.action === "read-current-user") return { id, request, error: null };
   if (
@@ -116,6 +119,8 @@ export async function handleHostBindingPayload(params, handlers) {
     let result;
     if (parsed.request.action === "ensure") {
       result = await handlers.ensure();
+    } else if (parsed.request.action === "find-thread-task") {
+      result = await handlers.findThreadTask(parsed.request);
     } else if (parsed.request.action === "read-current-user") {
       result = await handlers.readCurrentUser();
     } else if (parsed.request.action === "load-frame") {
@@ -154,6 +159,7 @@ export async function reconcileInjectionRuntime({
   registerCurrentSource,
   evaluateCurrentSource,
   publishRegistration,
+  beforeReopen = async () => {},
   reopen,
 }) {
   if (currentStatus.scriptIdentifier) {
@@ -166,7 +172,10 @@ export async function reconcileInjectionRuntime({
   await publishRegistration(scriptIdentifier);
   const replaced = currentStatus.sourceHash !== sourceHash;
   const shouldRemainOpen = currentStatus.pageVisible === true;
-  if (replaced && shouldRemainOpen) await reopen();
+  if (replaced && shouldRemainOpen) {
+    await beforeReopen();
+    await reopen();
+  }
   return { replaced, scriptIdentifier, shouldRemainOpen };
 }
 

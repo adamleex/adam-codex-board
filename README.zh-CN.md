@@ -1,6 +1,28 @@
 [English](README.md) | [简体中文](README.zh-CN.md)
 
-# Codex Taskboard
+# Adam Dashboard
+
+## 启动 Dashboard
+
+先确保 Codex 已开启调试端口 9231，然后运行：
+
+```bash
+git clone https://github.com/adamleex/adam-codex-board.git
+cd adam-codex-board
+npm run dashboard
+```
+
+使用期间保持此终端运行。该命令读取 `.data/dashboard.json` 保存的数据目录和 `.data/remote-bridges.json` 保存的 SSH 连接，构建前端、启动本地服务并接入 Codex 侧边栏。修改启动器代码后，在原终端按 `Ctrl+C` 停止旧 Dashboard，再执行同一命令。若提示已有 Launcher 占用，先在它的原终端停止，再重新启动。
+
+已配置的看板统一用此入口启动：直接运行 `scripts/codex-injector.mjs` 不会读取 `.data/dashboard.json`，可能打开另一份数据目录。侧边栏打开后，确认原有任务可见，Automation 能读取模型目录及配额状态。
+
+主要入口是 **Codex 侧边栏**。运行 `npm run dashboard`，缺少依赖时自动安装，然后构建并连接已开启调试能力的 Codex 实例。原生会话路径无需网页密码，也不启动独立执行 worker。若没有可连接的实例，启动器会报错，不替换正在运行的 App。
+
+“打开任务会话”优先打开任务保存的原生会话，并保留远程主机身份。未绑定的任务才在映射的 Codex 项目中准备新会话。开发机执行使用 Codex 自身的 SSH 项目连接。启动器根据 `.data/remote-bridges.json` 同时建立 SSH 反向转发；远程 Agent 使用 `$HOME/.config/adam-dashboard/launcher-runtime.json` 读写同一份看板。连接断开后自动重连，退出启动器时关闭自己创建的连接。
+
+首次配置开发机：`npm run dashboard -- --ssh-host main.sm100.adamlee.coder --host-id remote-ssh-codex-managed:coder`。之后只运行 `npm run dashboard`。默认使用 Codex 调试端口 9231，可用 `--cdp-port` 指定。本机看板端口为 47834。已有任务数据可通过 `--data-dir /绝对路径/.data` 保存配置；数据留在原目录，不做隐式复制。`npm run dashboard -- --check` 检查配置及旧启动器占用，不启动进程。无需在开发机启动另一份 Dashboard。
+
+此前的独立网页实验保留为 `npm run dashboard:standalone`，仅用于调试，不是侧边栏使用流程。Adam Dashboard 基于 [Codex Taskboard](https://github.com/chuspeeism/dashi-taskboard) 本地修改；下方上游发行链接仅用于说明来源。
 
 一个本地优先的议题面板，可在浏览器中运行，也可通过独立 CDP 启动器或其注入脚本嵌入 Codex。同一套 HTTP API 为 React UI 和随附 Codex Skill 使用的 `taskctl` CLI 提供支持。
 

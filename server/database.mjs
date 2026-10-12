@@ -27,15 +27,9 @@ function now() {
   return new Date().toISOString();
 }
 
+// A writer's threadId is attribution, not an execution binding.
 function storedThreadBindingForExisting(current, threadBinding, threadId) {
-  if (
-    threadBinding === undefined
-    && current?.threadBinding
-    && current.threadBinding.threadId === threadId
-  ) {
-    return storedThreadBinding(current.threadBinding, threadId);
-  }
-  return storedThreadBinding(threadBinding, threadId);
+  return storedThreadBinding(threadBinding);
 }
 
 function relationActivityValue(type, task) {
@@ -654,18 +648,7 @@ export class TaskboardDatabase {
         ON task_relations(target_task_id)
         WHERE relation_type = 'parent';
 
-      CREATE TRIGGER IF NOT EXISTS task_relations_require_same_project
-      BEFORE INSERT ON task_relations
-      BEGIN
-        SELECT RAISE(ABORT, 'CROSS_PROJECT_RELATION')
-        WHERE EXISTS (
-          SELECT 1
-          FROM tasks AS source
-          JOIN tasks AS target ON target.id = NEW.target_task_id
-          WHERE source.id = NEW.source_task_id
-            AND source.project_id != target.project_id
-        );
-      END;
+      DROP TRIGGER IF EXISTS task_relations_require_same_project;
 
       CREATE TRIGGER IF NOT EXISTS task_relations_prevent_parent_cycle
       BEFORE INSERT ON task_relations
@@ -1877,7 +1860,7 @@ export class TaskboardDatabase {
         input.priority,
         JSON.stringify(input.labels),
         sortOrder,
-        ...(storedThreadBinding(input.threadBinding, input.threadId) ?? [null, null, null, null, null]),
+        ...(storedThreadBinding(input.threadBinding) ?? [null, null, null, null, null]),
         input.actor.type,
         input.actor.id,
         input.actor.name,
@@ -1917,19 +1900,6 @@ export class TaskboardDatabase {
     }
     const projectChanged = Boolean(targetProject && targetProject.id !== current.projectId);
     if (projectChanged) {
-      const relation = this.database.prepare(`
-        SELECT 1
-        FROM task_relations
-        WHERE source_task_id = ? OR target_task_id = ?
-        LIMIT 1
-      `).get(current.id, current.id);
-      if (relation) {
-        throw new ApiError(
-          409,
-          "CROSS_PROJECT_RELATION",
-          "Remove issue relations before moving the issue to another project",
-        );
-      }
       if (this.hasAiChatThreadProjectConflict(current.id, targetProject.id)) {
         throw new ApiError(
           409,
@@ -2741,9 +2711,6 @@ export class TaskboardDatabase {
   #validateRelationTasks(task, relatedTask) {
     if (task.id === relatedTask.id) {
       throw new ApiError(400, "SELF_RELATION", "An issue cannot be related to itself");
-    }
-    if (task.projectId !== relatedTask.projectId) {
-      throw new ApiError(400, "CROSS_PROJECT_RELATION", "Issue relations must stay within one project");
     }
   }
 

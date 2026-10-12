@@ -1,5 +1,5 @@
 {
-  "name": "codex-taskboard",
+  "name": "adam-dashboard",
   "version": "1.1.26",
   "private": true,
   "type": "module",
@@ -40,7 +40,12 @@
     "cloud:deploy:dry-run": "npm run build:web && wrangler deploy --dry-run",
     "cloud:deploy": "npm run build:web && wrangler deploy",
     "cloud:data": "node scripts/migrate-to-cloud.mjs",
-    "check": "npm run typecheck && npm run build:web && npm test"
+    "check": "npm run typecheck && npm run build:web && npm test",
+    "start:central": "CODEX_TASKBOARD_MODE=central node server/index.mjs",
+    "worker": "node scripts/execution-worker.mjs",
+    "service:install": "node scripts/install-central-service.mjs",
+    "dashboard": "node scripts/dashboard.mjs",
+    "dashboard:standalone": "node scripts/manual-dashboard.mjs"
   },
   "dependencies": {
     "dhtmlx-gantt": "^10.0.0",

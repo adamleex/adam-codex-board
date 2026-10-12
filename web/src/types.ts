@@ -38,6 +38,8 @@ export interface DevelopmentScan {
 }
 
 export interface TaskboardMetadata {
+  executionMode?: "central";
+  remoteBoardHosts?: string[];
   manageTaskboardSkillPath?: string;
   capabilities?: TaskboardCapabilities;
   mode?: "local" | "cloud";
@@ -47,6 +49,13 @@ export interface TaskboardMetadata {
   localCapabilities?: {
     available: boolean;
   };
+}
+
+export interface ExecutionWorker {
+  id: string;
+  name: string;
+  online: boolean;
+  workspaceRoots: string[];
 }
 
 export interface TaskboardCapabilities {
@@ -277,6 +286,9 @@ export interface AiChatOrigin {
 }
 
 export interface AiChatRun {
+  executionStatus?: "queued" | "running" | "disconnected" | "completed" | "failed" | "interrupted";
+  workerId?: string;
+  cancelRequested?: boolean;
   id: string;
   threadId: string;
   status: AiChatRunStatus;
@@ -294,6 +306,7 @@ export interface AiChatTodoProgress {
 }
 
 export interface AiChatThread {
+  workerId?: string | null;
   id: string;
   title: string;
   status: AiChatThreadStatus;
@@ -537,6 +550,7 @@ export interface HostContext {
 }
 
 export interface TaskDraft {
+  projectId?: string;
   title: string;
   description: string;
   status: TaskStatus;

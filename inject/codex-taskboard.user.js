@@ -66,6 +66,11 @@
   } catch (_) {}
 
   let entry = null;
+  let returnToDashboardButton = null;
+  let returnTask = null;
+  let pendingReturnTask = null;
+  let returnLookupKey = "";
+  let returnLookupAt = 0;
   let page = null;
   let frame = null;
   let dragRegion = null;
@@ -182,6 +187,9 @@
       [${HIDDEN_ATTRIBUTE}="true"] {
         visibility: hidden !important;
         pointer-events: none !important;
+      }
+      [${HIDDEN_ATTRIBUTE}="true"] .sidebar-row-focus {
+        --sidebar-row-indicator-visibility: hidden !important;
       }
       [${HIDDEN_ATTRIBUTE}="true"] nav[data-app-navigation-rail] {
         visibility: visible !important;
@@ -947,6 +955,7 @@
   }
 
   function postHostContext() {
+    void syncConversationReturn();
     syncHostUiLanguage();
     if (!frame) return;
     const liveContext = readHostContext();
@@ -968,24 +977,11 @@
       .find((row) => normalizeThreadId(row.getAttribute("data-app-action-sidebar-thread-id")) === normalizeThreadId(threadId)) || null;
   }
 
-  function routeForThread(threadId) {
-    return `/local/${encodeURIComponent(threadId)}`;
-  }
-
-  function threadRowProjectId(row) {
-    return row?.closest?.("[data-app-action-sidebar-project-list-id]")
-      ?.getAttribute("data-app-action-sidebar-project-list-id")
-      || row?.closest?.("[data-app-action-sidebar-project-id]")
-        ?.getAttribute("data-app-action-sidebar-project-id")
-      || "";
-  }
-
-  function findThreadRowInProject(threadId, projectId) {
-    return Array.from(document.querySelectorAll("[data-app-action-sidebar-thread-id]"))
-      .find((row) => (
-        normalizeThreadId(row.getAttribute("data-app-action-sidebar-thread-id")) === normalizeThreadId(threadId)
-        && threadRowProjectId(row) === projectId
-      )) || null;
+  function routeForThread(threadId, hostId = "") {
+    const path = `/local/${encodeURIComponent(threadId)}`;
+    return hostId && hostId !== "local"
+      ? `${path}?hostId=${encodeURIComponent(hostId)}`
+      : path;
   }
 
   function projectRowById(projectId) {
@@ -1050,14 +1046,57 @@
     ));
   }
 
-  async function waitForRemoteThreadRow(threadId, projectId) {
-    const deadline = Date.now() + 8_000;
-    let row = findThreadRowInProject(threadId, projectId);
-    while (!row && Date.now() < deadline) {
-      await new Promise((resolve) => window.setTimeout(resolve, 80));
-      row = findThreadRowInProject(threadId, projectId);
+  async function syncConversationReturn() {
+    if (active || destroyed || !document.body) return;
+    showReturnToDashboard();
+    if (!hasLiveHostBinding()) return;
+    const row = activeThreadRow();
+    const href = row?.getAttribute("href") || row?.querySelector("a[href]")?.getAttribute("href");
+    const locationRoute = new URL(window.location.href);
+    const route = /\/(?:local|threads)\/[0-9a-f-]{36}/i.test(locationRoute.pathname)
+      ? locationRoute : new URL(href || window.location.href, window.location.href);
+    const match = route.pathname.match(/\/(?:local|threads)\/([0-9a-f-]{36})(?:\/|$)/i);
+    const rowThreadId = normalizeThreadId(row?.getAttribute("data-app-action-sidebar-thread-id") || "");
+    const threadId = match?.[1] || threadIdFromLocation() || rowThreadId;
+    const projectId = row?.closest("[data-app-action-sidebar-project-list-id]")
+      ?.getAttribute("data-app-action-sidebar-project-list-id");
+    const hostId = route.searchParams.get("hostId")
+      || codexProjectMetadata.get(projectId)?.hostId || "local";
+    const key = `${hostId}:${threadId}`;
+    if (key === returnLookupKey && Date.now() - returnLookupAt < 5000) return;
+    returnLookupKey = key;
+    returnLookupAt = Date.now();
+    returnTask = null;
+    showReturnToDashboard();
+    if (!/^[0-9a-f-]{36}$/i.test(threadId)) return;
+    try {
+      const result = await requestHost("find-thread-task", { threadId, hostId });
+      if (destroyed || active || returnLookupKey !== key) return;
+      if (result.tasks?.length !== 1) return;
+      returnTask = result.tasks[0];
+      showReturnToDashboard();
+    } catch (_) {}
+  }
+
+  function showReturnToDashboard() {
+    if (!returnToDashboardButton) {
+      returnToDashboardButton = document.createElement("button");
+      returnToDashboardButton.type = "button";
+      returnToDashboardButton.setAttribute(OWNED_ATTRIBUTE, "true");
+      returnToDashboardButton.style.cssText = "position:fixed;top:56px;right:24px;z-index:2147483646;padding:8px 12px;border:1px solid #8886;border-radius:8px;background:Canvas;color:CanvasText;font:13px system-ui;cursor:pointer;box-shadow:0 2px 8px #0002;-webkit-app-region:no-drag";
+      returnToDashboardButton.addEventListener("click", (event) => {
+        event.preventDefault();
+        event.stopPropagation();
+        pendingReturnTask = returnTask;
+        openTaskboard();
+      });
+      document.body.appendChild(returnToDashboardButton);
     }
-    return row;
+    if (!returnToDashboardButton.isConnected) document.body.appendChild(returnToDashboardButton);
+    const label = hostText("← 返回 Dashboard", "← Back to Dashboard")
+      + (returnTask ? ` · ${returnTask.identifier}` : "");
+    if (returnToDashboardButton.textContent !== label) returnToDashboardButton.textContent = label;
+    returnToDashboardButton.hidden = false;
   }
 
   async function openThread(payload) {
@@ -1077,16 +1116,13 @@
           ? payload.workspacePath.trim()
           : "";
         await waitForRemoteProject(projectId, hostId, workspacePath);
-        const row = await waitForRemoteThreadRow(normalizedThreadId, projectId);
-        if (!row?.isConnected) {
-          throw new Error(hostText(
-            "目标 SSH 远程项目中找不到该对话",
-            "The conversation is not available in the target SSH remote project",
-          ));
-        }
         lastNativeThreadId = normalizedThreadId;
         closeTaskboard(false);
-        row.click?.();
+        await dispatchHostMessage({
+          type: "navigate-to-route",
+          path: routeForThread(normalizedThreadId, hostId),
+        });
+        showReturnToDashboard();
       } catch (error) {
         postToFrame({
           type: "taskboard:thread-open-error",
@@ -1105,6 +1141,7 @@
 
     if (row?.isConnected) {
       row.click?.();
+      showReturnToDashboard();
       return;
     }
 
@@ -1113,6 +1150,7 @@
         type: "navigate-to-route",
         path: routeForThread(normalizedThreadId),
       });
+      showReturnToDashboard();
     } catch (_) {}
   }
 
@@ -1204,6 +1242,39 @@
       "Codex 未在限定时间内切换到目标项目或 worktree",
       "Codex did not switch to the target project or worktree in time",
     ));
+  }
+
+  async function createProjectForTaskboard(payload) {
+    const requestId = payload?.requestId;
+    const name = typeof payload?.name === "string" ? payload.name.trim() : "";
+    if (typeof requestId !== "string" || !name || name.length > 120) return;
+    try {
+      const bridge = window.electronBridge;
+      if (typeof bridge?.sendMessageFromView !== "function") {
+        throw new Error(hostText("请在 Codex 侧边栏中创建项目", "Create projects from the Codex sidebar"));
+      }
+      const previousIds = new Set((await nativeProjectContext()).projects.map(project => project.id));
+      // Let Codex display its own folder consent while the native operation runs.
+      closeTaskboard(false);
+      await bridge.sendMessageFromView({
+        type: "electron-create-new-workspace-root-option",
+        projectName: name,
+        initializeGitRepository: false,
+      });
+      const selectedId = await selectedNativeProjectId();
+      const project = (await nativeProjectContext()).projects.find(candidate => candidate.id === selectedId);
+      if (!project || previousIds.has(project.id) || !project.rootPaths[0]) {
+        throw new Error(hostText("Codex 未完成项目创建；任务尚未移动", "Codex did not complete project creation; the task has not moved"));
+      }
+      postToFrame({
+        type: "taskboard:project-created",
+        payload: { requestId, project: { id: project.id, name: project.name || name, workspacePath: project.rootPaths[0] } },
+      });
+    } catch (error) {
+      postToFrame({ type: "taskboard:project-created", payload: { requestId, error: error instanceof Error ? error.message : String(error) } });
+    } finally {
+      openTaskboard();
+    }
   }
 
   async function createThreadForTask(payload) {
@@ -1493,6 +1564,7 @@
       return;
     }
     if (message.type === "taskboard:create-thread") void createThreadForTask(message.payload);
+    if (message.type === "taskboard:create-project") void createProjectForTaskboard(message.payload);
   }
 
   function updateDragRegion(payload) {
@@ -1714,8 +1786,8 @@
   function requestHost(action, payload = {}, timeoutMs = HOST_REQUEST_TIMEOUT_MS) {
     if (!hasLiveHostBinding()) {
       return Promise.reject(hostError(
-        "Taskboard 启动器未运行，无法操作 Codex 对话输入框",
-        "The Taskboard launcher is not running, so the Codex composer is unavailable",
+        "Dashboard 与启动器的连接已中断，自动化暂不可用。请重新连接 Dashboard。",
+        "Dashboard lost its launcher connection. Automation is temporarily unavailable; reconnect Dashboard.",
       ));
     }
 
@@ -1790,8 +1862,12 @@
     const message = event.data;
     if (!message || typeof message !== "object" || message.capability !== HOST_CAPABILITY) return;
     if (message.type === HOST_HEARTBEAT_MESSAGE) {
+      const wasConnected = hasLiveHostBinding();
       hostHeartbeatAt = Number(message.at) || 0;
       window[HOST_STARTUP_TOKEN_NAME] = message.startupToken ?? null;
+      if (!wasConnected && hasLiveHostBinding()) {
+        postToFrame({ type: "taskboard:host-reconnected" });
+      }
       return;
     }
     if (message.type === HOST_RESPONSE_MESSAGE) onHostResponse(message.response);
@@ -1825,6 +1901,10 @@
       if (!active || generation !== openGeneration) return;
       showFrame();
       postHostContext();
+      if (pendingReturnTask) {
+        postToFrame({ type: "taskboard:open-task", payload: pendingReturnTask });
+        pendingReturnTask = null;
+      }
     } catch (error) {
       if (!active || generation !== openGeneration) return;
       const bindingAvailable = hasLiveHostBinding();
@@ -1928,10 +2008,12 @@
     if (restoreFocus) lastFocusedElement?.focus?.();
     lastFocusedElement = null;
     hostContextSnapshot = null;
+    if (!destroyed) void syncConversationReturn();
   }
 
   function openTaskboard() {
     if (destroyed) return;
+    if (returnToDashboardButton) returnToDashboardButton.hidden = true;
     if (!active) {
       lastFocusedElement = document.activeElement;
       hostContextSnapshot = readHostContext();
@@ -2050,6 +2132,7 @@
     closeTaskboard(false);
     document.querySelectorAll(`[${OWNED_ATTRIBUTE}="true"]`).forEach((node) => node.remove());
     entry = null;
+    returnToDashboardButton = null;
     entryLabel = null;
     page = null;
     frame = null;

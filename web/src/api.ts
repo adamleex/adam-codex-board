@@ -1,5 +1,6 @@
 import type {
   ActorIdentity,
+  ExecutionWorker,
   AiChatCatalog,
   AiChatAttachmentInput,
   AiChatRun,
@@ -256,11 +257,21 @@ export async function publishHostRuntime(context: HostContext): Promise<void> {
   });
 }
 
+export async function listExecutionWorkers(signal?: AbortSignal): Promise<ExecutionWorker[]> {
+  const data = await request<{ workers: ExecutionWorker[] }>("/api/execution/workers", { signal });
+  return data.workers;
+}
+
 export async function getAiChatCatalog(
   projectId: string,
   signal?: AbortSignal,
   codexProjectIdentity?: CodexProjectIdentity | null,
+  workerId?: string,
 ): Promise<AiChatCatalog> {
+  if (workerId) return request<AiChatCatalog>(
+    `/api/execution/workers/${encodeURIComponent(workerId)}/catalog?projectId=${encodeURIComponent(projectId)}`,
+    { signal },
+  );
   const query = new URLSearchParams();
   if (codexProjectIdentity) {
     query.set("codexProjectId", codexProjectIdentity.codexProjectId);
@@ -308,6 +319,8 @@ export async function listAiChatThreads(signal?: AbortSignal): Promise<AiChatThr
 
 export async function createAiChatThread(input: {
   projectId: string;
+  newConversation?: boolean;
+  workerId?: string;
   issueId?: string;
   title?: string;
   model?: string;
@@ -483,6 +496,10 @@ export async function uploadProjectReadmeAttachment(
     },
   );
   return data.attachment;
+}
+
+export function dashboardShare(method: "GET" | "POST" | "DELETE" = "GET"): Promise<{ url: string | null; localOnly: boolean }> {
+  return request("/api/dashboard-share", { method });
 }
 
 export async function createProject(input: {
@@ -715,6 +732,17 @@ export async function createComment(
     },
   );
   return data.comment;
+}
+
+export async function startCommentDiscussion(
+  commentId: string,
+  target: Partial<CodexProjectIdentity> & { workerId?: string } = {},
+): Promise<AiChatThread> {
+  const data = await request<{ thread: AiChatThread }>(
+    `/api/comments/${encodeURIComponent(commentId)}/discussion`,
+    { method: "POST", body: JSON.stringify(target) },
+  );
+  return data.thread;
 }
 
 export async function updateComment(comment: Comment, body: string, threadId?: string): Promise<Comment> {

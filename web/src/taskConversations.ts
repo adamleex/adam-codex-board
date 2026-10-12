@@ -86,7 +86,7 @@ export function taskConversations(task: Task, aiThreads: AiChatThread[]) {
     }
     const normalizedId = normalizeCodexThreadId(ref.threadId);
     if (!normalizedId) continue;
-    const key = `codex:${normalizedId}`;
+    const key = JSON.stringify(["codex", ref.legacyLocal ? "local" : ref.codexHostId ?? "local", normalizedId]);
     const current = items.get(key);
     const next: TaskConversationItem = {
       key,
@@ -114,7 +114,9 @@ export function taskConversations(task: Task, aiThreads: AiChatThread[]) {
   for (const thread of aiThreads) {
     if (thread.origin.projectId !== task.projectId || thread.origin.issueId !== task.id) continue;
     const normalizedId = normalizeCodexThreadId(thread.codexThreadId);
-    const key = normalizedId ? `codex:${normalizedId}` : `ai:${thread.id}`;
+    const key = normalizedId
+      ? JSON.stringify(["codex", thread.origin.codexHostId ?? thread.workerId ?? "local", normalizedId])
+      : `ai:${thread.id}`;
     const current = items.get(key);
     const threadActivityUpdatedAt = [
       thread.updatedAt,
@@ -198,8 +200,8 @@ export function taskCardPresentation(
     conversations,
     unread,
     processing: {
-      running: task.status === "in_progress"
-        && (Boolean(running) || taskNativeSession?.running === true),
+      running: Boolean(runningAi) || (task.status === "in_progress"
+        && (Boolean(runningNative) || taskNativeSession?.running === true)),
       completed: latestTodo?.completed ?? null,
       total: latestTodo?.total ?? null,
       startedAt: runningAi?.currentRun?.startedAt ?? null,

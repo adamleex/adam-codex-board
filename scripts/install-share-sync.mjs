@@ -1,0 +1,7 @@
+import {mkdir,writeFile} from 'node:fs/promises';
+import{homedir}from'node:os';import{spawnSync}from'node:child_process';import{fileURLToPath}from'node:url';import path from'node:path';
+const root=fileURLToPath(new URL('..',import.meta.url)),label='com.adam.dashboard-share-sync',dir=path.join(homedir(),'Library/LaunchAgents'),file=path.join(dir,label+'.plist');
+const xml=s=>s.replaceAll('&','&amp;').replaceAll('<','&lt;').replaceAll('>','&gt;');
+await mkdir(dir,{recursive:true});
+await writeFile(file,`<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd"><plist version="1.0"><dict><key>Label</key><string>${label}</string><key>ProgramArguments</key><array><string>${xml(process.execPath)}</string><string>${xml(path.join(root,'scripts/share-sync.mjs'))}</string></array><key>WorkingDirectory</key><string>${xml(root)}</string><key>RunAtLoad</key><true/><key>KeepAlive</key><true/><key>ThrottleInterval</key><integer>10</integer><key>StandardOutPath</key><string>${xml(path.join(root,'.data/share-sync.log'))}</string><key>StandardErrorPath</key><string>${xml(path.join(root,'.data/share-sync-error.log'))}</string></dict></plist>`);
+const result=spawnSync('launchctl',['bootstrap',`gui/${process.getuid()}`,file],{stdio:'inherit'});if(result.status!==0)process.exit(result.status);console.log('Dashboard sharing sync installed. Starts at login and runs independently of the sidebar.');

@@ -27,6 +27,7 @@ import {
   interruptAiChatRun,
   compactAiChatThread,
   listAiChatThreads,
+  listExecutionWorkers,
   rebindAiChatComposerReferences,
   startAiChatComposerTurn,
   startAiChatTurn,
@@ -52,6 +53,7 @@ import {
 } from "../aiChatState";
 import type {
   AiChatCatalog,
+  ExecutionWorker,
   AiChatEvent,
   AiChatAttachmentInput,
   AiChatModel,
@@ -100,6 +102,7 @@ export type AiChatOpenThreadRequest = {
 };
 
 interface AiChatProps {
+  executionMode?: "central";
   available: boolean;
   projectId: string | null;
   issueId: string | null;
@@ -166,6 +169,7 @@ type DraftThreadOrigin = {
   projectId: string;
   issueId: string | null;
   codexProjectIdentity: CodexProjectIdentity | null;
+  newConversation?: boolean;
 };
 type PanelResizeEdge = "top" | "left" | "top-left";
 type PanelGeometry = {
@@ -1229,6 +1233,7 @@ function MessageTimeline({
 
 export function AiChat({
   available,
+  executionMode,
   projectId,
   issueId,
   codexProjectIdentity,
@@ -1237,14 +1242,38 @@ export function AiChat({
   onOpenThreadRequestHandled,
 }: AiChatProps) {
   const { locale, text } = useTaskboardI18n();
+  const chatLabel = executionMode === "central"
+    ? text("Adam Dashboard AI 对话", "Adam Dashboard AI chat")
+    : text("Codex AI 对话", "Codex AI chat");
   const [panelOpen, setPanelOpen] = useState(false);
   const [historyOpen, setHistoryOpen] = useState(
     () => taskboardStorage.getItem(PANEL_VIEW_KEY) === "history",
   );
   const [menu, setMenu] = useState<MenuName>(null);
+  const [workers, setWorkers] = useState<ExecutionWorker[]>([]);
+  const [workerId, setWorkerId] = useState<string>("");
+  useEffect(() => {
+    if (executionMode !== "central") return;
+    const controller = new AbortController();
+    const refresh = () => void listExecutionWorkers(controller.signal).then((next) => {
+      if (!controller.signal.aborted) setWorkers(next);
+    }).catch((error) => {
+      if (!controller.signal.aborted) setError(messageFor(error));
+    });
+    refresh();
+    const timer = window.setInterval(refresh, 10_000);
+    return () => { window.clearInterval(timer); controller.abort(); };
+  }, [executionMode]);
   const [threads, setThreads] = useState<AiChatThread[]>([]);
+  const [threadsLoaded, setThreadsLoaded] = useState(false);
+  const selectionStorageKey = issueId
+    ? `${LAST_THREAD_KEY}:${projectId}:${issueId}`
+    : LAST_THREAD_KEY;
+  const inTaskScope = useCallback((thread: AiChatThread) => !issueId || (
+    thread.origin.projectId === projectId && thread.origin.issueId === issueId
+  ), [projectId, issueId]);
   const [selectedThreadId, setSelectedThreadId] = useState<string | null>(
-    () => taskboardStorage.getItem(LAST_THREAD_KEY),
+    () => taskboardStorage.getItem(selectionStorageKey),
   );
   const [snapshot, setSnapshot] = useState<AiChatThreadSnapshot | null>(null);
   const [draftOrigin, setDraftOrigin] = useState<DraftThreadOrigin | null>(null);
@@ -1308,9 +1337,9 @@ export function AiChat({
 
   useEffect(() => {
     selectedThreadRef.current = selectedThreadId;
-    if (selectedThreadId) taskboardStorage.setItem(LAST_THREAD_KEY, selectedThreadId);
-    else taskboardStorage.removeItem(LAST_THREAD_KEY);
-  }, [selectedThreadId]);
+    if (selectedThreadId) taskboardStorage.setItem(selectionStorageKey, selectedThreadId);
+    // Keep the last persisted selection while composing an explicit new chat.
+  }, [selectedThreadId, selectionStorageKey]);
 
   useEffect(() => {
     taskboardStorage.setItem(PANEL_VIEW_KEY, historyOpen ? "history" : "thread");
@@ -1494,18 +1523,22 @@ export function AiChat({
     try {
       const next = await listAiChatThreads();
       setThreads(next);
+      setThreadsLoaded(true);
       if (next.length === 0) setHistoryOpen(false);
       setSelectedThreadId((current) => {
-        const selected = current && next.some((thread) => thread.id === current)
+        const scoped = next.filter(inTaskScope);
+        const selected = current && scoped.some((thread) => thread.id === current)
           ? current
-          : next[0]?.id ?? null;
+          : (issueId && executionMode === "central"
+              ? scoped.find((thread) => thread.workerId)
+              : scoped[0])?.id ?? null;
         selectedThreadRef.current = selected;
         return selected;
       });
     } catch (nextError) {
       setError(messageFor(nextError));
     }
-  }, []);
+  }, [inTaskScope, issueId, executionMode]);
 
   useEffect(() => {
     if (!available) {
@@ -1514,7 +1547,7 @@ export function AiChat({
       return;
     }
     void loadThreads();
-  }, [available, loadThreads]);
+  }, [available, loadThreads, openThreadRequestId]);
 
   useEffect(() => {
     onThreadsChange?.(available ? threads : []);
@@ -1575,7 +1608,9 @@ export function AiChat({
     selectedThreadId,
   ]);
 
+  const visibleThreads = threads.filter(inTaskScope);
   const selectedThreadSummary = threads.find((thread) => thread.id === selectedThreadId) ?? null;
+  const catalogWorkerId = snapshot?.thread.workerId ?? selectedThreadSummary?.workerId ?? (workerId || undefined);
   const catalogProjectId = snapshot?.thread.origin.projectId
     ?? selectedThreadSummary?.origin.projectId
     ?? draftOrigin?.projectId
@@ -1609,7 +1644,7 @@ export function AiChat({
     setCatalog(null);
     setCatalogLoadedProjectId(null);
     setCatalogError(null);
-    void getAiChatCatalog(catalogProjectId, controller.signal, catalogCodexProjectIdentity).then(
+    void getAiChatCatalog(catalogProjectId, controller.signal, catalogCodexProjectIdentity, catalogWorkerId).then(
       (next) => {
         if (controller.signal.aborted) return;
         setCatalog(next);
@@ -1629,6 +1664,7 @@ export function AiChat({
   }, [
     available,
     catalogProjectId,
+    catalogWorkerId,
     catalogCodexProjectIdentity?.codexHostId,
     catalogCodexProjectIdentity?.codexProjectId,
     catalogCodexProjectIdentity?.codexProjectKind,
@@ -1749,15 +1785,16 @@ export function AiChat({
     ?? snapshot?.runs.find((run) => run.status === "running")
     ?? null;
   const visibleError = error ?? catalogError;
-  const composerBlocked = Boolean(
+  const historicalUnbound = executionMode === "central" && Boolean(snapshot && !snapshot.thread.workerId);
+  const composerBlocked = historicalUnbound || Boolean(
     selectedThreadId && deletingThreadId === selectedThreadId,
   );
-  const sendBlocked = loading
+  const sendBlocked = !threadsLoaded || loading
     || sending
     || settingsSaving
     || composerBlocked
     || Boolean(selectedThreadId && !snapshot);
-  const threadSettingsBlocked = loading || Boolean(selectedThreadId && !snapshot);
+  const threadSettingsBlocked = historicalUnbound || loading || Boolean(selectedThreadId && !snapshot);
   const attachmentBlocked = composerBlocked;
   const primaryAction = chatPrimaryAction(
     snapshot?.thread.status ?? "idle",
@@ -1825,13 +1862,22 @@ export function AiChat({
   }
 
   useEffect(() => {
-    if (!available || !openThreadRequest) return;
+    if (!available || !threadsLoaded || !openThreadRequest) return;
     if (handledOpenThreadRequestRef.current === openThreadRequest.requestId) return;
     if ("projectId" in openThreadRequest) {
       handledOpenThreadRequestRef.current = openThreadRequest.requestId;
       if (!draftOrigin) draftReturnThreadIdRef.current = selectedThreadRef.current;
       resetComposer();
-      setDraftOrigin({
+      const existing = openThreadRequest.issueId
+        ? threads.find((thread) => thread.origin.projectId === openThreadRequest.projectId
+          && thread.origin.issueId === openThreadRequest.issueId
+          && thread.id === taskboardStorage.getItem(
+            `${LAST_THREAD_KEY}:${openThreadRequest.projectId}:${openThreadRequest.issueId}`,
+          )) ?? threads.find((thread) => thread.origin.projectId === openThreadRequest.projectId
+            && thread.origin.issueId === openThreadRequest.issueId
+            && (executionMode !== "central" || thread.workerId))
+        : null;
+      setDraftOrigin(existing ? null : {
         projectId: openThreadRequest.projectId,
         issueId: openThreadRequest.issueId,
         codexProjectIdentity: openThreadRequest.projectId === projectId
@@ -1846,7 +1892,8 @@ export function AiChat({
           : null,
       };
       setSnapshot(null);
-      selectThread(null);
+      selectThread(existing?.id ?? null);
+      if (existing) void loadSnapshot(existing.id);
       setHistoryOpen(false);
       setMenu(null);
       setError(null);
@@ -1857,7 +1904,7 @@ export function AiChat({
       onOpenThreadRequestHandled(openThreadRequest.requestId);
       return;
     }
-    if (!threads.some((thread) => thread.id === openThreadRequest.threadId)) return;
+    if (!threads.some((thread) => thread.id === openThreadRequest.threadId && inTaskScope(thread))) return;
     handledOpenThreadRequestRef.current = openThreadRequest.requestId;
     const selectedChanged = selectedThreadRef.current !== openThreadRequest.threadId;
     const leavingDraft = draftOrigin !== null;
@@ -1881,6 +1928,8 @@ export function AiChat({
     draftOrigin,
     loadSnapshot,
     openThreadRequest,
+    threadsLoaded,
+    inTaskScope,
     onOpenThreadRequestHandled,
     selectThread,
     snapshot?.thread.id,
@@ -1906,9 +1955,9 @@ export function AiChat({
   function restorePersistedConversationFromDraft() {
     if (!draftOrigin) return;
     const previousThreadId = draftReturnThreadIdRef.current;
-    const nextThreadId = previousThreadId && threads.some((thread) => thread.id === previousThreadId)
+    const nextThreadId = previousThreadId && visibleThreads.some((thread) => thread.id === previousThreadId)
       ? previousThreadId
-      : threads[0]?.id ?? null;
+      : visibleThreads[0]?.id ?? null;
     draftReturnThreadIdRef.current = null;
     setDraftOrigin(null);
     setSnapshot(null);
@@ -1942,6 +1991,7 @@ export function AiChat({
       projectId: input.projectId,
       issueId: input.issueId ?? null,
       codexProjectIdentity,
+      newConversation: true,
     });
     setSnapshot(null);
     selectThread(null);
@@ -1951,7 +2001,7 @@ export function AiChat({
   }
 
   async function createThreadForDraftOrigin(): Promise<AiChatThread | null> {
-    const origin = draftOrigin ?? (
+    const origin: DraftThreadOrigin | null = draftOrigin ?? (
       projectId ? { projectId, issueId, codexProjectIdentity } : null
     );
     const input = buildThreadCreateInput(origin?.projectId ?? "", origin?.issueId ?? null);
@@ -1971,7 +2021,7 @@ export function AiChat({
     try {
       const targetCatalog = catalogLoadedProjectId === input.projectId && activeCatalog
         ? activeCatalog
-        : await getAiChatCatalog(input.projectId, undefined, origin?.codexProjectIdentity);
+        : await getAiChatCatalog(input.projectId, undefined, origin?.codexProjectIdentity, catalogWorkerId);
       const normalized = normalizeChatSelection(
         targetCatalog.models,
         inheritedSettings.model,
@@ -1990,11 +2040,13 @@ export function AiChat({
       const thread = await createAiChatThread({
         ...input,
         ...settings,
+        ...(workerId ? { workerId } : {}),
+        newConversation: origin?.newConversation ?? false,
         ...(origin?.codexProjectIdentity ?? {}),
       });
       replaceThread(thread);
       selectThread(thread.id);
-      setSnapshot({ thread, events: [], runs: [] });
+      await loadSnapshot(thread.id);
       draftReturnThreadIdRef.current = null;
       setDraftOrigin(null);
       setHistoryOpen(false);
@@ -2009,10 +2061,10 @@ export function AiChat({
   }
 
   async function deleteThread(thread: AiChatThread) {
-    if (!window.confirm(text(
-      `删除本地对话“${thread.title}”？`,
-      `Delete local chat “${thread.title}”?`,
-    ))) return;
+    if (!window.confirm(executionMode === "central"
+      ? text(`删除 Adam Dashboard 对话“${thread.title}”？`, `Delete Adam Dashboard chat “${thread.title}”?`)
+      : text(`删除本地对话“${thread.title}”？`, `Delete local chat “${thread.title}”?`)
+    )) return;
     setDeletingThreadId(thread.id);
     try {
       await deleteAiChatThread(thread.id);
@@ -2022,7 +2074,7 @@ export function AiChat({
       if (selectedThreadRef.current === thread.id) {
         setSnapshot(null);
         setDraftOrigin(null);
-        selectThread(remainingThreads[0]?.id ?? null);
+        selectThread(remainingThreads.find(inTaskScope)?.id ?? null);
         resetComposer();
       }
       setError(null);
@@ -2352,7 +2404,8 @@ export function AiChat({
       || node.type === "unsupportedReference"
     )) ?? false;
     const isTaskOriginPlainTextDraft = Boolean(
-      taskComposerDraftOriginRef.current
+      executionMode !== "central"
+      && taskComposerDraftOriginRef.current
       && currentComposerDocument?.nodes.every((node) => node.type === "text"),
     );
     if (isTaskOriginPlainTextDraft) {
@@ -2398,7 +2451,7 @@ export function AiChat({
         && submitted.dataBase64 === attachment.dataBase64)
     )).map((attachment) => attachment.id));
     if (!trimmed && messageAttachments.length === 0) return;
-    let thread = snapshot?.thread ?? null;
+    let thread = snapshot?.thread && inTaskScope(snapshot.thread) ? snapshot.thread : null;
     const messageSandbox = thread?.sandbox ?? draftSandbox;
     if (needsDangerConfirmation(messageSandbox, dangerConfirmed)) {
       setPendingDangerInput({
@@ -2765,8 +2818,8 @@ export function AiChat({
           ref={panelRef}
           className={`ai-chat-panel${panelResizeEdge ? ` is-resizing-${panelResizeEdge}` : ""}`}
           style={panelGeometry ?? undefined}
-          aria-label={text("Codex AI 对话", "Codex AI chat")}
-          data-screen-label={text("Codex AI 对话", "Codex AI chat")}
+          aria-label={chatLabel}
+          data-screen-label={chatLabel}
         >
           <div
             className="ai-chat-resize-handle is-top"
@@ -2806,7 +2859,7 @@ export function AiChat({
               title={projectId
                 ? text("新建对话", "New chat")
                 : text("请先进入项目", "Open a project first")}
-              disabled={!projectId || loading}
+              disabled={!projectId || loading || !threadsLoaded}
               onClick={beginNewConversation}
             >
               <PlusIcon color="currentColor" size={15} />
@@ -2824,13 +2877,32 @@ export function AiChat({
             </button>
           </header>
 
+          {executionMode === "central" && !selectedThreadId && (
+            <label>
+              {text("执行主机", "Worker")}
+              <select
+                aria-label={text("执行主机", "Worker")}
+                value={workerId}
+                disabled={loading || sending}
+                onChange={(event) => setWorkerId(event.target.value)}
+              >
+                <option value="">{text("自动选择", "Automatic")}</option>
+                {workers.map((worker) => (
+                  <option key={worker.id} value={worker.id} disabled={!worker.online}>
+                    {worker.name}{worker.online ? "" : text("（离线）", " (offline)")}
+                  </option>
+                ))}
+              </select>
+            </label>
+          )}
+
           {historyOpen && (
             <div className="ai-chat-history" aria-label={text("对话历史", "Chat history")}>
               <div className="ai-chat-history-heading">
                 <strong>{text("对话历史", "Chat history")}</strong>
-                <span>{threads.length}</span>
+                <span>{visibleThreads.length}</span>
               </div>
-              {threads.length > 0 ? threads.map((thread) => (
+              {visibleThreads.length > 0 ? visibleThreads.map((thread) => (
                 <div
                   className={`ai-chat-history-row${thread.id === selectedThreadId ? " is-active" : ""}`}
                   key={thread.id}
@@ -2855,7 +2927,7 @@ export function AiChat({
                     className="ai-chat-history-delete"
                     type="button"
                     aria-label={text(`删除对话 ${thread.title}`, `Delete chat ${thread.title}`)}
-                    title={text("删除本地记录", "Delete local record")}
+                    title={executionMode === "central" ? text("删除对话记录", "Delete chat record") : text("删除本地记录", "Delete local record")}
                     disabled={thread.status === "running" || deletingThreadId === thread.id}
                     onClick={() => void deleteThread(thread)}
                   >
@@ -2863,7 +2935,7 @@ export function AiChat({
                   </button>
                 </div>
               )) : (
-                <p>{text("还没有本地对话", "No local chats yet")}</p>
+                <p>{executionMode === "central" ? text("还没有 Adam Dashboard 对话", "No Adam Dashboard chats yet") : text("还没有本地对话", "No local chats yet")}</p>
               )}
             </div>
           )}
@@ -2889,7 +2961,13 @@ export function AiChat({
                 {snapshot.thread.status === "running" && (
                   <div className="ai-chat-running" role="status">
                     <span className="ai-chat-spinner" />
-                    {text("Codex 正在处理", "Codex is working")}
+                    {currentRun?.cancelRequested
+                      ? text("正在请求停止", "Stop requested")
+                      : currentRun?.executionStatus === "queued"
+                        ? text("等待执行主机接收", "Queued for worker")
+                        : currentRun?.executionStatus === "disconnected"
+                          ? text("执行主机已断开，等待重连", "Worker disconnected; waiting to reconnect")
+                          : text("Codex 正在处理", "Codex is working")}
                   </div>
                 )}
                 {retryableUserEvent && (
@@ -2926,6 +3004,12 @@ export function AiChat({
               </div>
             )}
           </div>
+
+          {historicalUnbound && (
+            <div className="ai-chat-error" role="status">
+              {text("此历史对话尚未绑定执行主机，可阅读但暂不能继续。", "This historical chat has no worker binding. It is readable but cannot be resumed yet.")}
+            </div>
+          )}
 
           {visibleError && (
             <div className="ai-chat-error" role="alert">

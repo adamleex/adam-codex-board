@@ -3,7 +3,7 @@
 import { spawn, spawnSync } from "node:child_process";
 import { createHash, createHmac, randomBytes, randomUUID } from "node:crypto";
 import { once } from "node:events";
-import { createReadStream, createWriteStream } from "node:fs";
+import { createReadStream, createWriteStream, existsSync } from "node:fs";
 import { chmod, mkdir, readFile, rename, stat, unlink, utimes, writeFile } from "node:fs/promises";
 import os from "node:os";
 import { createInterface } from "node:readline";
@@ -38,6 +38,8 @@ import {
   windowsCodexProfileArgument,
   windowsRootProcesses,
 } from "./windows-codex.mjs";
+
+import { readRemoteBridges, startRemoteBridges } from "./dashboard-remote-bridge.mjs";
 
 const injectorPath = fileURLToPath(import.meta.url);
 const projectRoot = path.resolve(path.dirname(injectorPath), "..");
@@ -91,7 +93,8 @@ const hostResponseMessage = "__codexTaskboardHostResponseV1";
 const hostHeartbeatMessage = "__codexTaskboardHostHeartbeatV1";
 const hostStartupTokenName = "__codexTaskboardHostStartupTokenV1";
 const codexNotificationBindingName = "__codexTaskboardCodexNotificationV1";
-const hostCapability = randomUUID();
+const hostCapability = process.env.CODEX_TASKBOARD_HOST_CAPABILITY?.trim() || randomUUID();
+process.env.CODEX_TASKBOARD_HOST_CAPABILITY = hostCapability;
 const injectionSourceHashName = "__CODEX_TASKBOARD_SOURCE_HASH__";
 const injectionScriptIdentifierName = "__CODEX_TASKBOARD_SCRIPT_IDENTIFIER__";
 const codexAutomationMethods = new Set([
@@ -142,7 +145,7 @@ function parseArgs(argv) {
     startupToken: null,
     daemon: false,
     screenshot: null,
-    appPath: process.platform === "linux" ? "/usr/bin/chatgpt" : "/Applications/ChatGPT.app",
+    appPath: process.platform === "linux" ? "/usr/bin/chatgpt" : existsSync("/Applications/Codex.app") ? "/Applications/Codex.app" : "/Applications/ChatGPT.app",
   };
 
   for (let index = 0; index < argv.length; index += 1) {
@@ -1903,7 +1906,11 @@ async function applyTaskboardAutomationPolicy(
         : null
     ) ?? items[0];
   }
-  let todoGate = request.enabledByUser && hasTodo ? previousTodoGate : undefined;
+  // Keep the reason for an automatic pause across empty-queue checks and restarts.
+  // A new todo must resume evaluation rather than look like a native/manual pause.
+  let todoGate = request.enabledByUser
+    ? hasTodo ? previousTodoGate : { snapshot: "empty", state: "wait" }
+    : undefined;
   let operation = taskboardAutomationPolicyOperation(request, {
     explicit,
     hasTodo,
@@ -2111,10 +2118,7 @@ function enqueueQuotaPolicyMutation(record, rpc, { explicit = false, evaluatedTo
         },
       );
       if (result.stale) return result;
-      if (result.hasTodo === false && result.operation === "pause") {
-        current.version += 1;
-        current.request = { ...current.request, enabledByUser: false };
-      } else if (!explicit && result.operation === "list" && result.item?.status === "PAUSED") {
+      if (!explicit && result.operation === "list" && result.item?.status === "PAUSED") {
         current.version += 1;
         current.request = { ...current.request, enabledByUser: false };
       }
@@ -2248,8 +2252,9 @@ async function startTaskConversationViaCdp(cdp, executionContextId, request) {
     previousThreadId,
     projectless,
     targetRoot,
-    title,
+    title: taskTitle,
   } = request;
+  const title = request.identifier ? `${request.identifier} · ${taskTitle}` : taskTitle;
   const normalizeWorkspaceRoot = (value) => {
     const root = String(value || "").trim();
     if (!root) return "";
@@ -2492,6 +2497,12 @@ function installTaskboardHostBinding(
       isAuthorizedContext: (executionContextId) => executionContextId === activeContextId,
       parseAutomationRequest: parseTaskboardAutomationHostRequest,
       ensure: () => supervisor.ensure({ force: true }),
+      findThreadTask: async ({ threadId, hostId }) => {
+        const { tasks } = await taskboardRequest("/api/tasks");
+        const matches = tasks.filter(task => (task.conversationRefs ?? []).some(ref =>
+          ref.threadId === threadId && (ref.codexHostId || "local") === hostId));
+        return { tasks: matches.map(({ identifier, projectId }) => ({ identifier, projectId })) };
+      },
       readCurrentUser: async () => {
         let account = await requestCodexAppServerViaCdp(
           cdp,
@@ -2610,7 +2621,10 @@ function installTaskboardHostBinding(
         returnByValue: true,
       });
       onCodexAppServerReady(cdp);
-      await restoreQuotaPolicies(cdp);
+      // Policy restoration can wait on remote hosts; it must not delay the bridge heartbeat.
+      void restoreQuotaPolicies(cdp).catch((error) => {
+        console.error(`Taskboard automation restore failed: ${error.message}`);
+      });
       return activeContextId;
     })();
     try {
@@ -2620,7 +2634,15 @@ function installTaskboardHostBinding(
     }
   }
 
-  async function publishHeartbeat() {
+  let heartbeatInFlight = null;
+  function publishHeartbeat() {
+    if (!heartbeatInFlight) {
+      heartbeatInFlight = sendHeartbeat().finally(() => { heartbeatInFlight = null; });
+    }
+    return heartbeatInFlight;
+  }
+
+  async function sendHeartbeat() {
     let timeout;
     try {
       await Promise.race([
@@ -2648,6 +2670,19 @@ function installTaskboardHostBinding(
       clearTimeout(timeout);
     }
   }
+
+  // Window discovery and service recovery may take longer than the heartbeat TTL.
+  // Each connection must stay alive independently of that work and other windows.
+  const heartbeatTimer = setInterval(() => {
+    if (cdp.closed) {
+      clearInterval(heartbeatTimer);
+      return;
+    }
+    void publishHeartbeat().catch((error) => {
+      console.error(`Taskboard heartbeat failed: ${error.message}`);
+    });
+  }, 2_000);
+  heartbeatTimer.unref?.();
 
   return { install, publishHeartbeat };
 }
@@ -2758,6 +2793,7 @@ async function injectTarget(
         registerCurrentSource: (currentSource) => registerInjectionSource(cdp, currentSource),
         evaluateCurrentSource: (currentSource) => evaluateInjectionSource(cdp, currentSource),
         publishRegistration: (identifier) => publishInjectionScriptIdentifier(cdp, identifier),
+        beforeReopen: () => hostBridge.publishHeartbeat(),
         reopen: () => cdp.send("Runtime.evaluate", {
           expression: "window.__codexTaskboardInjection__?.open()",
           returnByValue: true,
@@ -3026,6 +3062,10 @@ async function main() {
       if (current === connection) remoteCodexConnections.delete(hostId);
     }
   };
+  const remoteBridgeDirectory = process.env.ADAM_DASHBOARD_CONFIG_DIR ?? taskboardDataDirectory;
+  const remoteBridgeEntries = await readRemoteBridges(remoteBridgeDirectory);
+  process.env.ADAM_DASHBOARD_REMOTE_HOSTS = JSON.stringify(remoteBridgeEntries.map(entry => entry.codexHostId));
+  let remoteBridges = null;
   let taskboardChild = null;
   let idleAfterNormalExit = false;
   let openRequestGeneration = options.open ? 1 : 0;
@@ -3312,6 +3352,7 @@ async function main() {
       injectedTargets.clear();
       cdpRuntime?.close();
       cdpRuntime = null;
+      await remoteBridges?.stop();
       const supervisorCleanupPromise = supervisor.stop();
       const runtimeCleanupPromise = (async () => {
         const pendingRuntimePublish = runtimePublishPromise;
@@ -3391,6 +3432,7 @@ async function main() {
     if (stopping) return;
     await publishRuntime();
     if (stopping) return;
+    remoteBridges = startRemoteBridges({ entries: remoteBridgeEntries, url: taskboardBaseUrl, directory: remoteBridgeDirectory });
 
     if (options.cdpPipe || !cdpReachable) {
       const launchRequestGeneration = openRequestGeneration;
@@ -3489,11 +3531,6 @@ async function main() {
         console.error(`Waiting for Taskboard service: ${error.message}`);
       }
       if (stopping) break;
-      for (const connection of injectedTargets.values()) {
-        try {
-          await connection.hostBridge?.publishHeartbeat();
-        } catch (_) {}
-      }
       if (nativeCodexBrowser) {
         if (codexAppProcesses(options.appPath).length === 0) {
           nativeCodexBrowser = false;
