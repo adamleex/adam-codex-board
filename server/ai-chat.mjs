@@ -384,7 +384,7 @@ export class AiChatService {
     }
 
     return this.database.createAiChatThread({
-      title: issue ? `${issue.identifier} · ${issue.title}` : input.title ?? "New conversation",
+      title: input.title ?? (issue ? `${issue.identifier} · ${issue.title}` : "New conversation"),
       origin: {
         projectId: resolved.project.id,
         projectName: resolved.project.name,
@@ -820,6 +820,7 @@ export class AiChatService {
       if (typeof appServerThreadId !== "string" || !appServerThreadId) {
         throw new Error("Codex did not provide a thread id");
       }
+      await appServer.request("thread/name/set", { threadId: appServerThreadId, name: thread.title });
       this.database.updateAiChatThread(thread.id, { codexThreadId: appServerThreadId });
     }
 

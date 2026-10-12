@@ -2739,7 +2739,7 @@ export function createTaskboardServer(options = {}) {
           projectId: task.projectId,
           issueId: task.id,
           newConversation: true,
-          title: `${task.identifier} · ${comment.body.slice(0, 100) || "讨论"}`,
+          title: `${task.identifier} · ${task.title} · 讨论`,
           sandbox: "read-only",
         });
         const comments = database.listComments(task.id);
