@@ -4,7 +4,7 @@
 
 ## 启动 Dashboard
 
-先确保 Codex 已开启调试端口 9231，然后运行：
+在 macOS 上运行下面一条命令即可启动 Codex 和 Dashboard，无需先手动开启调试端口：
 
 ```bash
 git clone https://github.com/adamleex/adam-codex-board.git
@@ -14,9 +14,11 @@ npm run dashboard
 
 使用期间保持此终端运行。该命令读取 `.data/dashboard.json` 保存的数据目录和 `.data/remote-bridges.json` 保存的 SSH 连接，构建前端、启动本地服务并接入 Codex 侧边栏。修改启动器代码后，在原终端按 `Ctrl+C` 停止旧 Dashboard，再执行同一命令。若提示已有 Launcher 占用，先在它的原终端停止，再重新启动。
 
+已有可连接的 Codex 调试窗口时会复用它；否则自动找到 `/Applications` 中的 Codex 或 ChatGPT App，使用 `.data/codex-profile` 中的独立配置启动调试窗口，再注入侧边栏。已保存的原数据库目录保持不变，不复制或迁移数据。其他平台仍需先启动已开启调试端口的 Codex。
+
 已配置的看板统一用此入口启动：直接运行 `scripts/codex-injector.mjs` 不会读取 `.data/dashboard.json`，可能打开另一份数据目录。侧边栏打开后，确认原有任务可见，Automation 能读取模型目录及配额状态。
 
-主要入口是 **Codex 侧边栏**。运行 `npm run dashboard`，缺少依赖时自动安装，然后构建并连接已开启调试能力的 Codex 实例。原生会话路径无需网页密码，也不启动独立执行 worker。若没有可连接的实例，启动器会报错，不替换正在运行的 App。
+主要入口是 **Codex 侧边栏**。运行 `npm run dashboard`，缺少依赖时自动安装，然后构建、准备 Codex 调试窗口并接入侧边栏。原生会话路径无需网页密码，也不启动独立执行 worker。普通 Codex 正在运行时，可另外启动独立调试窗口。
 
 “打开任务会话”优先打开任务保存的原生会话，并保留远程主机身份。未绑定的任务才在映射的 Codex 项目中准备新会话。开发机执行使用 Codex 自身的 SSH 项目连接。启动器根据 `.data/remote-bridges.json` 同时建立 SSH 反向转发；远程 Agent 使用 `$HOME/.config/adam-dashboard/launcher-runtime.json` 读写同一份看板。连接断开后自动重连，退出启动器时关闭自己创建的连接。
 
