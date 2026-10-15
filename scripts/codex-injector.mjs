@@ -3374,8 +3374,8 @@ async function main() {
         cdpRuntime = null;
       }
       const launchedCodex = codexProcess;
-      let launchedManagedCodex = managedCodex;
-      if (!launchedManagedCodex && !options.cdpPipe) {
+      let launchedManagedCodex = options.attachExisting ? null : managedCodex;
+      if (!options.attachExisting && !launchedManagedCodex && !options.cdpPipe) {
         const discovered = managedCodexProcess(options.appPath);
         if (discovered && managedCodexUsesPort(discovered, options.port)) {
           launchedManagedCodex = discovered;

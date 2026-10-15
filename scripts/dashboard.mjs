@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-import { spawn } from 'node:child_process';
+import { execFileSync, spawn } from 'node:child_process';
 import { existsSync } from 'node:fs';
 import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import { withoutTaskboardLauncherEnvironment } from '../shared/codex-environment.mjs';
@@ -28,7 +28,7 @@ Options:
 
 Configuration: .data/remote-bridges.json (saved once).
 Ctrl+C stops the processes started by this command.
-An existing debugging-enabled Codex instance is required.`);
+On macOS, Codex starts automatically when no debugging instance is available.`);
     process.exit(0);
   }
   if (args[i] === '--check') { options.check = true; continue; }
@@ -58,6 +58,44 @@ async function run(command, args, env = process.env) {
     child.once('error', reject);
     child.once('exit', (code, signal) => { child = null; code === 0 || stopping ? resolve() : reject(new Error(`${path.basename(command)} exited (${signal ?? code})`)); });
   });
+}
+async function prepareCodex() {
+  const debuggingUrl = `http://127.0.0.1:${cdpPort}/json/version`;
+  const isReady = async () => {
+    try { return (await fetch(debuggingUrl, { signal: AbortSignal.timeout(1500) })).ok; }
+    catch { return false; }
+  };
+  let app;
+  if (process.platform === 'darwin') {
+    const apps = ['/Applications/Codex.app', '/Applications/ChatGPT.app'];
+    const commands = execFileSync('/bin/ps', ['-ww', '-axo', 'command='], { encoding: 'utf8' }).split('\n').map(line => line.trim());
+    const running = candidate => {
+      const executable = `${candidate}/Contents/MacOS/${path.basename(candidate, '.app')}`;
+      return commands.filter(command => command === executable || command.startsWith(`${executable} `));
+    };
+    const portArgument = new RegExp(` --remote-debugging-port(?:=|\\s+)${cdpPort}(?: |$)`);
+    app = apps.find(candidate => running(candidate).some(command => portArgument.test(command)))
+      ?? apps.find(candidate => running(candidate).length > 0)
+      ?? apps.find(existsSync);
+  }
+  if (await isReady()) return app;
+  if (stopping) return;
+  if (process.platform !== 'darwin') throw new Error(`Start Codex with debugging enabled on port ${cdpPort}, then run npm run dashboard again.`);
+  if (!app) throw new Error('Install Codex.app or ChatGPT.app in /Applications before starting Adam Dashboard.');
+  await mkdir(configDirectory, { recursive: true, mode: 0o700 });
+  console.log(`Starting Codex with debugging enabled on port ${cdpPort}`);
+  await run('/usr/bin/open', ['-n', '-a', app, '--args',
+    `--user-data-dir=${path.join(configDirectory, 'codex-profile')}`,
+    '--remote-debugging-address=127.0.0.1',
+    `--remote-debugging-port=${cdpPort}`,
+    `--remote-allow-origins=http://127.0.0.1:${cdpPort}`,
+  ], withoutTaskboardLauncherEnvironment(process.env));
+  const deadline = Date.now() + 60_000;
+  while (!stopping && Date.now() < deadline) {
+    if (await isReady()) return app;
+    await new Promise(resolve => setTimeout(resolve, 250));
+  }
+  if (!stopping) throw new Error(`Timed out starting Codex debugging on port ${cdpPort}`);
 }
 async function main() {
   if (options['share-origin']) {
@@ -96,7 +134,10 @@ async function main() {
   const npmArgs = npm ? [npm] : [];
   if (!existsSync(path.join(root, 'node_modules'))) await run(npmCommand, [...npmArgs, 'ci']);
   await run(npmCommand, [...npmArgs, 'run', 'build:web']);
-  await run(process.execPath, [path.join(root, 'scripts/codex-injector.mjs'), '--attach-existing', '--watch', '--open', '--port', String(cdpPort)], {
+  const app = await prepareCodex();
+  const injectorArgs = [path.join(root, 'scripts/codex-injector.mjs'), '--attach-existing', '--watch', '--open', '--port', String(cdpPort)];
+  if (app) injectorArgs.push('--app-path', app);
+  await run(process.execPath, injectorArgs, {
     ...withoutTaskboardLauncherEnvironment(process.env), CODEX_TASKBOARD_DATA_DIR:data, CODEX_TASKBOARD_HOST:'127.0.0.1',
     CODEX_TASKBOARD_RUNTIME_FILE:path.join(configDirectory, 'launcher-runtime.json'),
     CODEX_TASKBOARD_PORT:'47834', ADAM_DASHBOARD_CONFIG_DIR:configDirectory,
